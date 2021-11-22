@@ -65,16 +65,14 @@ test_expect_success 'parse errors in blobs are properly attributed' '
 '
 
 test_expect_success 'can parse blob ending with CR' '
-	printf "[some]key = value\\r" >config &&
-	git add config &&
-	git commit -m CR &&
+	test_commit --printf CR config "[some]key = value\\r" &&
 	echo value >expect &&
 	git config --blob=HEAD:config some.key >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'config --blob outside of a repository is an error' '
-	test_must_fail nongit git config --blob=foo --list
+	nongit test_must_fail git config --blob=foo --list
 '
 
 test_done

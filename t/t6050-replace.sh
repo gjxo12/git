@@ -4,6 +4,9 @@
 #
 test_description='Tests replace refs functionality'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-gpg.sh"
 
@@ -40,7 +43,8 @@ commit_peeling_shows_parents ()
 	test "$_found" = "$_parent" || return 1
 	_parent_number=$(( $_parent_number + 1 ))
     done &&
-    test_must_fail git rev-parse --verify $_commit^$_parent_number
+    test_must_fail git rev-parse --verify $_commit^$_parent_number 2>err &&
+    test_i18ngrep "Needed a single revision" err
 }
 
 commit_has_parents ()
@@ -128,13 +132,13 @@ tagger T A Gger <> 0 +0000
 EOF
 
 test_expect_success 'tag replaced commit' '
-     git mktag <tag.sig >.git/refs/tags/mytag 2>message
+     git update-ref refs/tags/mytag $(git mktag <tag.sig)
 '
 
 test_expect_success '"git fsck" works' '
-     git fsck master >fsck_master.out &&
-     test_i18ngrep "dangling commit $R" fsck_master.out &&
-     test_i18ngrep "dangling tag $(cat .git/refs/tags/mytag)" fsck_master.out &&
+     git fsck main >fsck_main.out &&
+     test_i18ngrep "dangling commit $R" fsck_main.out &&
+     test_i18ngrep "dangling tag $(git show-ref -s refs/tags/mytag)" fsck_main.out &&
      test -z "$(git fsck)"
 '
 
@@ -217,7 +221,7 @@ test_expect_success 'create parallel branch without the bug' '
      git cherry-pick $HASH6 &&
      PARA6=$(git rev-parse --verify HEAD) &&
      git replace $HASH6 $PARA6 &&
-     git checkout master &&
+     git checkout main &&
      cur=$(git rev-parse --verify HEAD) &&
      test "$cur" = "$HASH7" &&
      git log --pretty=oneline | grep $PARA2 &&
@@ -393,14 +397,38 @@ test_expect_success 'replace ref cleanup' '
 '
 
 test_expect_success '--graft with and without already replaced object' '
-	test $(git log --oneline | wc -l) = 7 &&
+	git log --oneline >log &&
+	test_line_count = 7 log &&
 	git replace --graft $HASH5 &&
-	test $(git log --oneline | wc -l) = 3 &&
+	git log --oneline >log &&
+	test_line_count = 3 log &&
 	commit_has_parents $HASH5 &&
 	test_must_fail git replace --graft $HASH5 $HASH4 $HASH3 &&
 	git replace --force -g $HASH5 $HASH4 $HASH3 &&
 	commit_has_parents $HASH5 $HASH4 $HASH3 &&
 	git replace -d $HASH5
+'
+
+test_expect_success '--graft using a tag as the new parent' '
+	git tag new_parent $HASH5 &&
+	git replace --graft $HASH7 new_parent &&
+	commit_has_parents $HASH7 $HASH5 &&
+	git replace -d $HASH7 &&
+	git tag -a -m "annotated new parent tag" annotated_new_parent $HASH5 &&
+	git replace --graft $HASH7 annotated_new_parent &&
+	commit_has_parents $HASH7 $HASH5 &&
+	git replace -d $HASH7
+'
+
+test_expect_success '--graft using a tag as the replaced object' '
+	git tag replaced_object $HASH7 &&
+	git replace --graft replaced_object $HASH5 &&
+	commit_has_parents $HASH7 $HASH5 &&
+	git replace -d $HASH7 &&
+	git tag -a -m "annotated replaced object tag" annotated_replaced_object $HASH7 &&
+	git replace --graft annotated_replaced_object $HASH5 &&
+	commit_has_parents $HASH7 $HASH5 &&
+	git replace -d $HASH7
 '
 
 test_expect_success GPG 'set up a signed commit' '
@@ -436,7 +464,7 @@ test_expect_success GPG 'set up a merge commit with a mergetag' '
 	git commit -m "hello: 2 more lines from a test branch" &&
 	HASH9=$(git rev-parse --verify HEAD) &&
 	git tag -s -m "tag for testing with a mergetag" test_tag HEAD &&
-	git checkout master &&
+	git checkout main &&
 	git merge -s ours test_tag &&
 	HASH10=$(git rev-parse --verify HEAD) &&
 	git cat-file commit $HASH10 | grep "^mergetag object"

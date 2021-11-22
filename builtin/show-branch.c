@@ -4,23 +4,23 @@
 #include "refs.h"
 #include "builtin.h"
 #include "color.h"
-#include "argv-array.h"
+#include "strvec.h"
 #include "parse-options.h"
 #include "dir.h"
 #include "commit-slab.h"
 
 static const char* show_branch_usage[] = {
     N_("git show-branch [-a | --all] [-r | --remotes] [--topo-order | --date-order]\n"
-       "		[--current] [--color[=<when>] | --no-color] [--sparse]\n"
-       "		[--more=<n> | --list | --independent | --merge-base]\n"
-       "		[--no-name | --sha1-name] [--topics] [(<rev> | <glob>)...]"),
+       "                [--current] [--color[=<when>] | --no-color] [--sparse]\n"
+       "                [--more=<n> | --list | --independent | --merge-base]\n"
+       "                [--no-name | --sha1-name] [--topics] [(<rev> | <glob>)...]"),
     N_("git show-branch (-g | --reflog)[=<n>[,<base>]] [--list] [<ref>]"),
     NULL
 };
 
 static int showbranch_use_color = -1;
 
-static struct argv_array default_args = ARGV_ARRAY_INIT;
+static struct strvec default_args = STRVEC_INIT;
 
 /*
  * TODO: convert this use of commit->object.flags to commit-slab
@@ -482,10 +482,9 @@ static void snarf_refs(int head, int remotes)
 	}
 }
 
-static int rev_is_head(const char *head, const char *name,
-		       unsigned char *head_sha1, unsigned char *sha1)
+static int rev_is_head(const char *head, const char *name)
 {
-	if (!head || (head_sha1 && sha1 && !hasheq(head_sha1, sha1)))
+	if (!head)
 		return 0;
 	skip_prefix(head, "refs/heads/", &head);
 	if (!skip_prefix(name, "refs/heads/", &name))
@@ -514,7 +513,6 @@ static int show_merge_base(struct commit_list *seen, int num_rev)
 
 static int show_independent(struct commit **rev,
 			    int num_rev,
-			    char **ref_name,
 			    unsigned int *rev_mask)
 {
 	int i;
@@ -537,7 +535,7 @@ static void append_one_rev(const char *av)
 		append_ref(av, &revkey, 0);
 		return;
 	}
-	if (strchr(av, '*') || strchr(av, '?') || strchr(av, '[')) {
+	if (strpbrk(av, "*?[")) {
 		/* glob style match */
 		int saved_matches = ref_name_cnt;
 
@@ -562,9 +560,9 @@ static int git_show_branch_config(const char *var, const char *value, void *cb)
 		 * default_arg is now passed to parse_options(), so we need to
 		 * mimic the real argv a bit better.
 		 */
-		if (!default_args.argc)
-			argv_array_push(&default_args, "show-branch");
-		argv_array_push(&default_args, value);
+		if (!default_args.nr)
+			strvec_push(&default_args, "show-branch");
+		strvec_push(&default_args, value);
 		return 0;
 	}
 
@@ -672,11 +670,11 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			    N_("topologically sort, maintaining date order "
 			       "where possible"),
 			    REV_SORT_BY_COMMIT_DATE),
-		{ OPTION_CALLBACK, 'g', "reflog", &reflog_base, N_("<n>[,<base>]"),
+		OPT_CALLBACK_F('g', "reflog", &reflog_base, N_("<n>[,<base>]"),
 			    N_("show <n> most recent ref-log entries starting at "
 			       "base"),
 			    PARSE_OPT_OPTARG | PARSE_OPT_NONEG,
-			    parse_reflog_param },
+			    parse_reflog_param),
 		OPT_END()
 	};
 
@@ -685,9 +683,9 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 	git_config(git_show_branch_config, NULL);
 
 	/* If nothing is specified, try the default first */
-	if (ac == 1 && default_args.argc) {
-		ac = default_args.argc;
-		av = default_args.argv;
+	if (ac == 1 && default_args.nr) {
+		ac = default_args.nr;
+		av = default_args.v;
 	}
 
 	ac = parse_options(ac, av, prefix, builtin_show_branch_options,
@@ -742,7 +740,7 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			die(Q_("only %d entry can be shown at one time.",
 			       "only %d entries can be shown at one time.",
 			       MAX_REVS), MAX_REVS);
-		if (!dwim_ref(*av, strlen(*av), &oid, &ref))
+		if (!dwim_ref(*av, strlen(*av), &oid, &ref, 0))
 			die(_("no such ref %s"), *av);
 
 		/* Has the base been specified? */
@@ -753,7 +751,8 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 				/* Ah, that is a date spec... */
 				timestamp_t at;
 				at = approxidate(reflog_base);
-				read_ref_at(ref, flags, at, -1, &oid, NULL,
+				read_ref_at(get_main_ref_store(the_repository),
+					    ref, flags, at, -1, &oid, NULL,
 					    NULL, NULL, &base);
 			}
 		}
@@ -765,7 +764,8 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			timestamp_t timestamp;
 			int tz;
 
-			if (read_ref_at(ref, flags, 0, base + i, &oid, &logmsg,
+			if (read_ref_at(get_main_ref_store(the_repository),
+					ref, flags, 0, base + i, &oid, &logmsg,
 					&timestamp, &tz, NULL)) {
 				reflog = i;
 				break;
@@ -805,9 +805,7 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 			/* We are only interested in adding the branch
 			 * HEAD points at.
 			 */
-			if (rev_is_head(head,
-					ref_name[i],
-					head_oid.hash, NULL))
+			if (rev_is_head(head, ref_name[i]))
 				has_head++;
 		}
 		if (!has_head) {
@@ -860,16 +858,14 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 		return show_merge_base(seen, num_rev);
 
 	if (independent)
-		return show_independent(rev, num_rev, ref_name, rev_mask);
+		return show_independent(rev, num_rev, rev_mask);
 
 	/* Show list; --more=-1 means list-only */
 	if (1 < num_rev || extra < 0) {
 		for (i = 0; i < num_rev; i++) {
 			int j;
-			int is_head = rev_is_head(head,
-						  ref_name[i],
-						  head_oid.hash,
-						  rev[i]->object.oid.hash);
+			int is_head = rev_is_head(head, ref_name[i]) &&
+				      oideq(&head_oid, &rev[i]->object.oid);
 			if (extra < 0)
 				printf("%c [%s] ",
 				       is_head ? '*' : ' ', ref_name[i]);
@@ -938,9 +934,12 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
 					mark = '*';
 				else
 					mark = '+';
-				printf("%s%c%s",
-				       get_color_code(i),
-				       mark, get_color_reset_code());
+				if (mark == ' ')
+					putchar(mark);
+				else
+					printf("%s%c%s",
+					       get_color_code(i),
+					       mark, get_color_reset_code());
 			}
 			putchar(' ');
 		}

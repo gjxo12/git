@@ -7,6 +7,9 @@ test_description='git tag
 
 Tests for operations with tags.'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-gpg.sh
 . "$TEST_DIRECTORY"/lib-terminal.sh
@@ -16,6 +19,13 @@ Tests for operations with tags.'
 tag_exists () {
 	git show-ref --quiet --verify refs/tags/"$1"
 }
+
+test_expect_success 'setup' '
+	test_oid_cache <<-EOM
+	othersigheader sha1:gpgsig-sha256
+	othersigheader sha256:gpgsig
+	EOM
+'
 
 test_expect_success 'listing all tags in an empty tree should succeed' '
 	git tag -l &&
@@ -88,7 +98,7 @@ test_expect_success 'creating a tag with --create-reflog should create reflog' '
 	git tag --create-reflog tag_with_reflog &&
 	git reflog exists refs/tags/tag_with_reflog &&
 	sed -e "s/^.*	//" .git/logs/refs/tags/tag_with_reflog >actual &&
-	test_i18ncmp expected actual
+	test_cmp expected actual
 '
 
 test_expect_success 'annotated tag with --create-reflog has correct message' '
@@ -99,7 +109,7 @@ test_expect_success 'annotated tag with --create-reflog has correct message' '
 	git tag -m "annotated tag" --create-reflog tag_with_reflog &&
 	git reflog exists refs/tags/tag_with_reflog &&
 	sed -e "s/^.*	//" .git/logs/refs/tags/tag_with_reflog >actual &&
-	test_i18ncmp expected actual
+	test_cmp expected actual
 '
 
 test_expect_success '--create-reflog does not create reflog on failure' '
@@ -227,10 +237,10 @@ test_expect_success \
 test_expect_success \
 	'trying to delete two tags, existing and not, should fail in the 2nd' '
 	tag_exists mytag &&
-	! tag_exists myhead &&
-	test_must_fail git tag -d mytag anothertag &&
+	! tag_exists nonexistingtag &&
+	test_must_fail git tag -d mytag nonexistingtag &&
 	! tag_exists mytag &&
-	! tag_exists myhead
+	! tag_exists nonexistingtag
 '
 
 test_expect_success 'trying to delete an already deleted tag should fail' \
@@ -517,7 +527,6 @@ test_expect_success \
 test_expect_success \
 	'trying to create tags giving both -m or -F options should fail' '
 	echo "message file 1" >msgfile1 &&
-	echo "message file 2" >msgfile2 &&
 	! tag_exists msgtag &&
 	test_must_fail git tag -m "message 1" -F msgfile1 msgtag &&
 	! tag_exists msgtag &&
@@ -929,6 +938,27 @@ test_expect_success GPG \
 	'test_config tag.forcesignannotated false &&
 	git tag --sign -m "A message" forcesignannotated-disabled &&
 	get_tag_msg forcesignannotated-disabled >actual &&
+	test_cmp expect actual
+'
+
+get_tag_header gpgsign-enabled $commit commit $time >expect
+echo "A message" >>expect
+echo '-----BEGIN PGP SIGNATURE-----' >>expect
+test_expect_success GPG \
+	'git tag configured tag.gpgsign enables GPG sign' \
+	'test_config tag.gpgsign true &&
+	git tag -m "A message" gpgsign-enabled &&
+	get_tag_msg gpgsign-enabled>actual &&
+	test_cmp expect actual
+'
+
+get_tag_header no-sign $commit commit $time >expect
+echo "A message" >>expect
+test_expect_success GPG \
+	'git tag --no-sign configured tag.gpgsign skip GPG sign' \
+	'test_config tag.gpgsign true &&
+	git tag -a --no-sign -m "A message" no-sign &&
+	get_tag_msg no-sign>actual &&
 	test_cmp expect actual
 '
 
@@ -1351,6 +1381,24 @@ test_expect_success GPG \
 	'test_config gpg.program echo &&
 	 test_must_fail git tag -s -m tail tag-gpg-failure'
 
+# try to produce invalid signature
+test_expect_success GPG 'git verifies tag is valid with double signature' '
+	git tag -s -m tail tag-gpg-double-sig &&
+	git cat-file tag tag-gpg-double-sig >tag &&
+	othersigheader=$(test_oid othersigheader) &&
+	sed -ne "/^\$/q;p" tag >new-tag &&
+	cat <<-EOM >>new-tag &&
+	$othersigheader -----BEGIN PGP SIGNATURE-----
+	 someinvaliddata
+	 -----END PGP SIGNATURE-----
+	EOM
+	sed -e "1,/^tagger/d" tag >>new-tag &&
+	new_tag=$(git hash-object -t tag -w new-tag) &&
+	git update-ref refs/tags/tag-gpg-double-sig $new_tag &&
+	git verify-tag tag-gpg-double-sig &&
+	git fsck
+'
+
 # try to sign with bad user.signingkey
 test_expect_success GPGSM \
 	'git tag -s fails if gpgsm is misconfigured (bad key)' \
@@ -1386,7 +1434,7 @@ test_expect_success 'message in editor has initial comment: first line' '
 	# check the first line --- should be empty
 	echo >first.expect &&
 	sed -e 1q <actual >first.actual &&
-	test_i18ncmp first.expect first.actual
+	test_cmp first.expect first.actual
 '
 
 test_expect_success \
@@ -1399,7 +1447,7 @@ test_expect_success \
 get_tag_header reuse $commit commit $time >expect
 echo "An annotation to be reused" >> expect
 test_expect_success \
-	'overwriting an annoted tag should use its previous body' '
+	'overwriting an annotated tag should use its previous body' '
 	git tag -a -m "An annotation to be reused" reuse &&
 	GIT_EDITOR=true git tag -f -a reuse &&
 	get_tag_msg reuse >actual &&
@@ -1563,7 +1611,7 @@ test_expect_success 'checking that branch head with --no-contains lists all but 
 "
 
 test_expect_success 'merging original branch into this branch' '
-	git merge --strategy=ours master &&
+	git merge --strategy=ours main &&
         git tag v4.0
 '
 
@@ -1697,6 +1745,18 @@ test_expect_success '--points-at finds annotated tags of tags' '
 	annotated-v4.0
 	EOF
 	git tag --points-at=annotated-v4.0 >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'recursive tagging should give advice' '
+	sed -e "s/|$//" <<-EOF >expect &&
+	hint: You have created a nested tag. The object referred to by your new tag is
+	hint: already a tag. If you meant to tag the object that it points to, use:
+	hint: |
+	hint: 	git tag -f nested annotated-v4.0^{}
+	hint: Disable this message with "git config advice.nestedTag false"
+	EOF
+	git tag -m nested nested annotated-v4.0 2>actual &&
 	test_cmp expect actual
 '
 
@@ -1912,15 +1972,15 @@ test_expect_success ULIMIT_STACK_SIZE '--contains and --no-contains work in a de
 	i=1 &&
 	while test $i -lt 8000
 	do
-		echo "commit refs/heads/master
+		echo "commit refs/heads/main
 committer A U Thor <author@example.com> $((1000000000 + $i * 100)) +0200
 data <<EOF
 commit #$i
 EOF"
-		test $i = 1 && echo "from refs/heads/master^0"
+		test $i = 1 && echo "from refs/heads/main^0"
 		i=$(($i + 1))
 	done | git fast-import &&
-	git checkout master &&
+	git checkout main &&
 	git tag far-far-away HEAD^ &&
 	run_with_limited_stack git tag --contains HEAD >actual &&
 	test_must_be_empty actual &&
@@ -1936,6 +1996,10 @@ test_expect_success '--format should list tags as per format given' '
 	EOF
 	git tag -l --format="refname : %(refname)" "v1*" >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'git tag -l with --format="%(rest)" must fail' '
+	test_must_fail git tag -l --format="%(rest)" "v1*"
 '
 
 test_expect_success "set up color tests" '
@@ -1983,8 +2047,8 @@ test_expect_success '--merged can be used in non-list mode' '
 	test_cmp expect actual
 '
 
-test_expect_success '--merged is incompatible with --no-merged' '
-	test_must_fail git tag --merged HEAD --no-merged HEAD
+test_expect_success '--merged is compatible with --no-merged' '
+	git tag --merged HEAD --no-merged HEAD
 '
 
 test_expect_success '--merged shows merged tags' '

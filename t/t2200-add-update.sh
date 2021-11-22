@@ -129,13 +129,16 @@ test_expect_success 'add -n -u should not add but just report' '
 		echo "remove '\''top'\''"
 	) >expect &&
 	before=$(git ls-files -s check top) &&
+	git count-objects -v >objects_before &&
 	echo changed >>check &&
 	rm -f top &&
 	git add -n -u >actual &&
 	after=$(git ls-files -s check top) &&
+	git count-objects -v >objects_after &&
 
 	test "$before" = "$after" &&
-	test_i18ncmp expect actual
+	test_cmp objects_before objects_after &&
+	test_cmp expect actual
 
 '
 
@@ -179,7 +182,8 @@ test_expect_success 'add -u resolves unmerged paths' '
 
 test_expect_success '"add -u non-existent" should fail' '
 	test_must_fail git add -u non-existent &&
-	! (git ls-files | grep "non-existent")
+	git ls-files >actual &&
+	! grep "non-existent" actual
 '
 
 test_done

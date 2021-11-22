@@ -40,11 +40,13 @@ int cmd__prio_queue(int argc, const char **argv)
 		} else if (!strcmp(*argv, "stack")) {
 			pq.compare = NULL;
 		} else {
-			int *v = malloc(sizeof(*v));
+			int *v = xmalloc(sizeof(*v));
 			*v = atoi(*argv);
 			prio_queue_put(&pq, v);
 		}
 	}
+
+	clear_prio_queue(&pq);
 
 	return 0;
 }

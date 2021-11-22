@@ -3,7 +3,7 @@
 #include "tree-walk.h"
 #include "object-store.h"
 
-static int score_missing(unsigned mode, const char *path)
+static int score_missing(unsigned mode)
 {
 	int score;
 
@@ -16,7 +16,7 @@ static int score_missing(unsigned mode, const char *path)
 	return score;
 }
 
-static int score_differs(unsigned mode1, unsigned mode2, const char *path)
+static int score_differs(unsigned mode1, unsigned mode2)
 {
 	int score;
 
@@ -29,7 +29,7 @@ static int score_differs(unsigned mode1, unsigned mode2, const char *path)
 	return score;
 }
 
-static int score_matches(unsigned mode1, unsigned mode2, const char *path)
+static int score_matches(unsigned mode1, unsigned mode2)
 {
 	int score;
 
@@ -98,24 +98,22 @@ static int score_trees(const struct object_id *hash1, const struct object_id *ha
 
 		if (cmp < 0) {
 			/* path1 does not appear in two */
-			score += score_missing(one.entry.mode, one.entry.path);
+			score += score_missing(one.entry.mode);
 			update_tree_entry(&one);
 		} else if (cmp > 0) {
 			/* path2 does not appear in one */
-			score += score_missing(two.entry.mode, two.entry.path);
+			score += score_missing(two.entry.mode);
 			update_tree_entry(&two);
 		} else {
 			/* path appears in both */
 			if (!oideq(&one.entry.oid, &two.entry.oid)) {
 				/* they are different */
 				score += score_differs(one.entry.mode,
-						       two.entry.mode,
-						       one.entry.path);
+						       two.entry.mode);
 			} else {
 				/* same subtree or blob */
 				score += score_matches(one.entry.mode,
-						       two.entry.mode,
-						       one.entry.path);
+						       two.entry.mode);
 			}
 			update_tree_entry(&one);
 			update_tree_entry(&two);
@@ -142,7 +140,7 @@ static void match_trees(const struct object_id *hash1,
 	while (one.size) {
 		const char *path;
 		const struct object_id *elem;
-		unsigned mode;
+		unsigned short mode;
 		int score;
 
 		elem = tree_entry_extract(&one, &path, &mode);
@@ -198,7 +196,7 @@ static int splice_tree(const struct object_id *oid1, const char *prefix,
 	rewrite_here = NULL;
 	while (desc.size) {
 		const char *name;
-		unsigned mode;
+		unsigned short mode;
 
 		tree_entry_extract(&desc, &name, &mode);
 		if (strlen(name) == toplen &&
@@ -228,7 +226,7 @@ static int splice_tree(const struct object_id *oid1, const char *prefix,
 		    oid_to_hex(oid1));
 	if (*subpath) {
 		struct object_id tree_oid;
-		hashcpy(tree_oid.hash, rewrite_here);
+		oidread(&tree_oid, rewrite_here);
 		status = splice_tree(&tree_oid, subpath, oid2, &subtree);
 		if (status)
 			return status;
@@ -250,7 +248,8 @@ static int splice_tree(const struct object_id *oid1, const char *prefix,
  * other hand, it could cover tree one and we might need to pick a
  * subtree of it.
  */
-void shift_tree(const struct object_id *hash1,
+void shift_tree(struct repository *r,
+		const struct object_id *hash1,
 		const struct object_id *hash2,
 		struct object_id *shifted,
 		int depth_limit)
@@ -287,12 +286,12 @@ void shift_tree(const struct object_id *hash1,
 
 	if (add_score < del_score) {
 		/* We need to pick a subtree of two */
-		unsigned mode;
+		unsigned short mode;
 
 		if (!*del_prefix)
 			return;
 
-		if (get_tree_entry(hash2, del_prefix, shifted, &mode))
+		if (get_tree_entry(r, hash2, del_prefix, shifted, &mode))
 			die("cannot find path %s in tree %s",
 			    del_prefix, oid_to_hex(hash2));
 		return;
@@ -309,22 +308,23 @@ void shift_tree(const struct object_id *hash1,
  * Unfortunately we cannot fundamentally tell which one to
  * be prefixed, as recursive merge can work in either direction.
  */
-void shift_tree_by(const struct object_id *hash1,
+void shift_tree_by(struct repository *r,
+		   const struct object_id *hash1,
 		   const struct object_id *hash2,
 		   struct object_id *shifted,
 		   const char *shift_prefix)
 {
 	struct object_id sub1, sub2;
-	unsigned mode1, mode2;
+	unsigned short mode1, mode2;
 	unsigned candidate = 0;
 
 	/* Can hash2 be a tree at shift_prefix in tree hash1? */
-	if (!get_tree_entry(hash1, shift_prefix, &sub1, &mode1) &&
+	if (!get_tree_entry(r, hash1, shift_prefix, &sub1, &mode1) &&
 	    S_ISDIR(mode1))
 		candidate |= 1;
 
 	/* Can hash1 be a tree at shift_prefix in tree hash2? */
-	if (!get_tree_entry(hash2, shift_prefix, &sub2, &mode2) &&
+	if (!get_tree_entry(r, hash2, shift_prefix, &sub2, &mode2) &&
 	    S_ISDIR(mode2))
 		candidate |= 2;
 

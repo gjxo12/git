@@ -4,6 +4,9 @@
 #
 
 test_description='Test prune and reflog expiration'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 check_have () {
@@ -30,14 +33,13 @@ check_fsck () {
 }
 
 corrupt () {
-	aa=${1%??????????????????????????????????????} zz=${1#??}
-	mv .git/objects/$aa/$zz .git/$aa$zz
+	mv .git/objects/$(test_oid_to_path $1) .git/$1
 }
 
 recover () {
-	aa=${1%??????????????????????????????????????} zz=${1#??}
+	aa=$(echo $1 | cut -c 1-2)
 	mkdir -p .git/objects/$aa
-	mv .git/$aa$zz .git/objects/$aa/$zz
+	mv .git/$1 .git/objects/$(test_oid_to_path $1)
 }
 
 check_dont_have () {
@@ -100,7 +102,7 @@ test_expect_success setup '
 
 	check_fsck &&
 
-	git reflog refs/heads/master >output &&
+	git reflog refs/heads/main >output &&
 	test_line_count = 4 output
 '
 
@@ -117,7 +119,7 @@ test_expect_success rewind '
 
 	check_have A B C D E F G H I J K L &&
 
-	git reflog refs/heads/master >output &&
+	git reflog refs/heads/main >output &&
 	test_line_count = 5 output
 '
 
@@ -136,7 +138,7 @@ test_expect_success 'reflog expire --dry-run should not touch reflog' '
 		--stale-fix \
 		--all &&
 
-	git reflog refs/heads/master >output &&
+	git reflog refs/heads/main >output &&
 	test_line_count = 5 output &&
 
 	check_fsck "missing blob $F"
@@ -150,10 +152,36 @@ test_expect_success 'reflog expire' '
 		--stale-fix \
 		--all &&
 
-	git reflog refs/heads/master >output &&
+	git reflog refs/heads/main >output &&
 	test_line_count = 2 output &&
 
 	check_fsck "dangling commit $K"
+'
+
+test_expect_success '--stale-fix handles missing objects generously' '
+	git -c core.logAllRefUpdates=false fast-import --date-format=now <<-EOS &&
+	commit refs/heads/stale-fix
+	mark :1
+	committer Author <a@uth.or> now
+	data <<EOF
+	start stale fix
+	EOF
+	M 100644 inline file
+	data <<EOF
+	contents
+	EOF
+	commit refs/heads/stale-fix
+	committer Author <a@uth.or> now
+	data <<EOF
+	stale fix branch tip
+	EOF
+	from :1
+	EOS
+
+	parent_oid=$(git rev-parse stale-fix^) &&
+	test_when_finished "recover $parent_oid" &&
+	corrupt $parent_oid &&
+	git reflog expire --stale-fix
 '
 
 test_expect_success 'prune and fsck' '
@@ -187,29 +215,29 @@ test_expect_success 'delete' '
 	git commit -m tiger C &&
 
 	HEAD_entry_count=$(git reflog | wc -l) &&
-	master_entry_count=$(git reflog show master | wc -l) &&
+	main_entry_count=$(git reflog show main | wc -l) &&
 
 	test $HEAD_entry_count = 5 &&
-	test $master_entry_count = 5 &&
+	test $main_entry_count = 5 &&
 
 
-	git reflog delete master@{1} &&
-	git reflog show master > output &&
-	test $(($master_entry_count - 1)) = $(wc -l < output) &&
+	git reflog delete main@{1} &&
+	git reflog show main > output &&
+	test_line_count = $(($main_entry_count - 1)) output &&
 	test $HEAD_entry_count = $(git reflog | wc -l) &&
 	! grep ox < output &&
 
-	master_entry_count=$(wc -l < output) &&
+	main_entry_count=$(wc -l < output) &&
 
 	git reflog delete HEAD@{1} &&
 	test $(($HEAD_entry_count -1)) = $(git reflog | wc -l) &&
-	test $master_entry_count = $(git reflog show master | wc -l) &&
+	test $main_entry_count = $(git reflog show main | wc -l) &&
 
 	HEAD_entry_count=$(git reflog | wc -l) &&
 
-	git reflog delete master@{07.04.2005.15:15:00.-0700} &&
-	git reflog show master > output &&
-	test $(($master_entry_count - 1)) = $(wc -l < output) &&
+	git reflog delete main@{07.04.2005.15:15:00.-0700} &&
+	git reflog show main > output &&
+	test_line_count = $(($main_entry_count - 1)) output &&
 	! grep dragon < output
 
 '
@@ -217,7 +245,7 @@ test_expect_success 'delete' '
 test_expect_success 'rewind2' '
 
 	test_tick && git reset --hard HEAD~2 &&
-	git reflog refs/heads/master >output &&
+	git reflog refs/heads/main >output &&
 	test_line_count = 4 output
 '
 
@@ -227,53 +255,62 @@ test_expect_success '--expire=never' '
 		--expire=never \
 		--expire-unreachable=never \
 		--all &&
-	git reflog refs/heads/master >output &&
+	git reflog refs/heads/main >output &&
 	test_line_count = 4 output
 '
 
 test_expect_success 'gc.reflogexpire=never' '
+	test_config gc.reflogexpire never &&
+	test_config gc.reflogexpireunreachable never &&
 
-	git config gc.reflogexpire never &&
-	git config gc.reflogexpireunreachable never &&
-	git reflog expire --verbose --all &&
-	git reflog refs/heads/master >output &&
+	git reflog expire --verbose --all >output &&
+	test_line_count = 9 output &&
+
+	git reflog refs/heads/main >output &&
 	test_line_count = 4 output
 '
 
 test_expect_success 'gc.reflogexpire=false' '
+	test_config gc.reflogexpire false &&
+	test_config gc.reflogexpireunreachable false &&
 
-	git config gc.reflogexpire false &&
-	git config gc.reflogexpireunreachable false &&
 	git reflog expire --verbose --all &&
-	git reflog refs/heads/master >output &&
-	test_line_count = 4 output &&
-
-	git config --unset gc.reflogexpire &&
-	git config --unset gc.reflogexpireunreachable
+	git reflog refs/heads/main >output &&
+	test_line_count = 4 output
 
 '
 
+test_expect_success 'git reflog expire unknown reference' '
+	test_config gc.reflogexpire never &&
+	test_config gc.reflogexpireunreachable never &&
+
+	test_must_fail git reflog expire main@{123} 2>stderr &&
+	test_i18ngrep "points nowhere" stderr &&
+	test_must_fail git reflog expire does-not-exist 2>stderr &&
+	test_i18ngrep "points nowhere" stderr
+'
+
 test_expect_success 'checkout should not delete log for packed ref' '
-	test $(git reflog master | wc -l) = 4 &&
+	test $(git reflog main | wc -l) = 4 &&
 	git branch foo &&
 	git pack-refs --all &&
 	git checkout foo &&
-	test $(git reflog master | wc -l) = 4
+	test $(git reflog main | wc -l) = 4
 '
 
 test_expect_success 'stale dirs do not cause d/f conflicts (reflogs on)' '
 	test_when_finished "git branch -d one || git branch -d one/two" &&
 
-	git branch one/two master &&
-	echo "one/two@{0} branch: Created from master" >expect &&
+	git branch one/two main &&
+	echo "one/two@{0} branch: Created from main" >expect &&
 	git log -g --format="%gd %gs" one/two >actual &&
 	test_cmp expect actual &&
 	git branch -d one/two &&
 
 	# now logs/refs/heads/one is a stale directory, but
 	# we should move it out of the way to create "one" reflog
-	git branch one master &&
-	echo "one@{0} branch: Created from master" >expect &&
+	git branch one main &&
+	echo "one@{0} branch: Created from main" >expect &&
 	git log -g --format="%gd %gs" one >actual &&
 	test_cmp expect actual
 '
@@ -281,15 +318,15 @@ test_expect_success 'stale dirs do not cause d/f conflicts (reflogs on)' '
 test_expect_success 'stale dirs do not cause d/f conflicts (reflogs off)' '
 	test_when_finished "git branch -d one || git branch -d one/two" &&
 
-	git branch one/two master &&
-	echo "one/two@{0} branch: Created from master" >expect &&
+	git branch one/two main &&
+	echo "one/two@{0} branch: Created from main" >expect &&
 	git log -g --format="%gd %gs" one/two >actual &&
 	test_cmp expect actual &&
 	git branch -d one/two &&
 
 	# same as before, but we only create a reflog for "one" if
 	# it already exists, which it does not
-	git -c core.logallrefupdates=false branch one master &&
+	git -c core.logallrefupdates=false branch one main &&
 	git log -g --format="%gd %gs" one >actual &&
 	test_must_be_empty actual
 '
@@ -304,12 +341,12 @@ test_expect_success 'stale dirs do not cause d/f conflicts (reflogs off)' '
 # Each line is 114 characters, so we need 75 to still have a few before the
 # last 8K. The 89-character padding on the final entry lines up our
 # newline exactly.
-test_expect_success 'parsing reverse reflogs at BUFSIZ boundaries' '
+test_expect_success SHA1 'parsing reverse reflogs at BUFSIZ boundaries' '
 	git checkout -b reflogskip &&
-	z38=00000000000000000000000000000000000000 &&
+	zf=$(test_oid zero_2) &&
 	ident="abc <xyz> 0000000001 +0000" &&
 	for i in $(test_seq 1 75); do
-		printf "$z38%02d $z38%02d %s\t" $i $(($i+1)) "$ident" &&
+		printf "$zf%02d $zf%02d %s\t" $i $(($i+1)) "$ident" &&
 		if test $i = 75; then
 			for j in $(test_seq 1 89); do
 				printf X
@@ -320,7 +357,7 @@ test_expect_success 'parsing reverse reflogs at BUFSIZ boundaries' '
 		printf "\n"
 	done >.git/logs/refs/heads/reflogskip &&
 	git rev-parse reflogskip@{73} >actual &&
-	echo ${z38}03 >expect &&
+	echo ${zf}03 >expect &&
 	test_cmp expect actual
 '
 
@@ -337,7 +374,9 @@ test_expect_failure 'reflog with non-commit entries displays all entries' '
 	test_line_count = 3 actual
 '
 
-test_expect_success 'reflog expire operates on symref not referrent' '
+# This test takes a lock on an individual ref; this is not supported in
+# reftable.
+test_expect_success REFFILES 'reflog expire operates on symref not referrent' '
 	git branch --create-reflog the_symref &&
 	git branch --create-reflog referrent &&
 	git update-ref referrent HEAD &&

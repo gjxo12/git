@@ -5,6 +5,7 @@
 #include "refs.h"
 #include "refspec.h"
 #include "remote.h"
+#include "sequencer.h"
 #include "commit.h"
 #include "worktree.h"
 
@@ -268,9 +269,9 @@ void create_branch(struct repository *r,
 	}
 
 	real_ref = NULL;
-	if (get_oid(start_name, &oid)) {
+	if (get_oid_mb(start_name, &oid)) {
 		if (explicit_tracking) {
-			if (advice_set_upstream_failure) {
+			if (advice_enabled(ADVICE_SET_UPSTREAM_FAILURE)) {
 				error(_(upstream_missing), start_name);
 				advise(_(upstream_advice));
 				exit(1);
@@ -280,7 +281,7 @@ void create_branch(struct repository *r,
 		die(_("Not a valid object name: '%s'."), start_name);
 	}
 
-	switch (dwim_ref(start_name, strlen(start_name), &oid, &real_ref)) {
+	switch (dwim_ref(start_name, strlen(start_name), &oid, &real_ref, 0)) {
 	case 0:
 		/* Not branching from any existing branch */
 		if (explicit_tracking)
@@ -293,7 +294,7 @@ void create_branch(struct repository *r,
 			if (explicit_tracking)
 				die(_(upstream_not_branch), start_name);
 			else
-				real_ref = NULL;
+				FREE_AND_NULL(real_ref);
 		}
 		break;
 	default:
@@ -321,7 +322,7 @@ void create_branch(struct repository *r,
 		transaction = ref_transaction_begin(&err);
 		if (!transaction ||
 		    ref_transaction_update(transaction, ref.buf,
-					   &oid, forcing ? NULL : &null_oid,
+					   &oid, forcing ? NULL : null_oid(),
 					   0, msg, &err) ||
 		    ref_transaction_commit(transaction, &err))
 			die("%s", err.buf);
@@ -337,15 +338,21 @@ void create_branch(struct repository *r,
 	free(real_ref);
 }
 
-void remove_branch_state(struct repository *r)
+void remove_merge_branch_state(struct repository *r)
 {
-	unlink(git_path_cherry_pick_head(r));
-	unlink(git_path_revert_head(r));
 	unlink(git_path_merge_head(r));
 	unlink(git_path_merge_rr(r));
 	unlink(git_path_merge_msg(r));
 	unlink(git_path_merge_mode(r));
+	unlink(git_path_auto_merge(r));
+	save_autostash(git_path_merge_autostash(r));
+}
+
+void remove_branch_state(struct repository *r, int verbose)
+{
+	sequencer_post_commit_cleanup(r, verbose);
 	unlink(git_path_squash_msg(r));
+	remove_merge_branch_state(r);
 }
 
 void die_if_checked_out(const char *branch, int ignore_current_worktree)
@@ -364,7 +371,7 @@ int replace_each_worktree_head_symref(const char *oldref, const char *newref,
 				      const char *logmsg)
 {
 	int ret = 0;
-	struct worktree **worktrees = get_worktrees(0);
+	struct worktree **worktrees = get_worktrees();
 	int i;
 
 	for (i = 0; worktrees[i]; i++) {

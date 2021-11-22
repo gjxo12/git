@@ -1,12 +1,14 @@
 #!/bin/sh
 
 test_description='git blame corner cases'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 pick_fc='s/^[0-9a-f^]* *\([^ ]*\) *(\([^ ]*\) .*/\1-\2/'
 
 test_expect_success setup '
-
 	echo A A A A A >one &&
 	echo B B B B B >two &&
 	echo C C C C C >tres &&
@@ -162,18 +164,17 @@ test_expect_success 'blame wholesale copy and more in the index' '
 
 test_expect_success 'blame during cherry-pick with file rename conflict' '
 
-	test_when_finished "git reset --hard && git checkout master" &&
+	test_when_finished "git reset --hard && git checkout main" &&
 	git checkout HEAD~3 &&
 	echo MOUSE >> mouse &&
 	git mv mouse rodent &&
 	git add rodent &&
 	GIT_AUTHOR_NAME=Rodent git commit -m "rodent" &&
-	git checkout --detach master &&
+	git checkout --detach main &&
 	(git cherry-pick HEAD@{1} || test $? -eq 1) &&
 	git show HEAD@{1}:rodent > rodent &&
 	git add rodent &&
 	git blame -f -C -C1 rodent | sed -e "$pick_fc" >current &&
-	cat current &&
 	cat >expected <<-\EOF &&
 	mouse-Initial
 	mouse-Second
@@ -273,6 +274,52 @@ test_expect_success 'blame file with CRLF core.autocrlf=true' '
 	rm tmp &&
 	git blame crlfinrepo >actual &&
 	grep "A U Thor" actual
+'
+
+test_expect_success 'setup coalesce tests' '
+	cat >giraffe <<-\EOF &&
+	ABC
+	DEF
+	EOF
+	git add giraffe &&
+	git commit -m "original file" &&
+	orig=$(git rev-parse HEAD) &&
+
+	cat >giraffe <<-\EOF &&
+	ABC
+	SPLIT
+	DEF
+	EOF
+	git add giraffe &&
+	git commit -m "interior SPLIT line" &&
+	split=$(git rev-parse HEAD) &&
+
+	cat >giraffe <<-\EOF &&
+	ABC
+	DEF
+	EOF
+	git add giraffe &&
+	git commit -m "same contents as original" &&
+	final=$(git rev-parse HEAD)
+'
+
+test_expect_success 'blame coalesce' '
+	cat >expect <<-EOF &&
+	$orig 1 1 2
+	$orig 2 2
+	EOF
+	git blame --porcelain $final giraffe >actual.raw &&
+	grep "^$orig" actual.raw >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'blame does not coalesce non-adjacent result lines' '
+	cat >expect <<-EOF &&
+	$orig 1) ABC
+	$orig 3) DEF
+	EOF
+	git blame --no-abbrev -s -L1,1 -L3,3 $split giraffe >actual &&
+	test_cmp expect actual
 '
 
 test_done

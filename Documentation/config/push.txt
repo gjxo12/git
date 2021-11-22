@@ -1,6 +1,7 @@
 push.default::
 	Defines the action `git push` should take if no refspec is
-	explicitly given.  Different values are well-suited for
+	given (whether from the command-line, config, or elsewhere).
+	Different values are well-suited for
 	specific workflows; for instance, in a purely central workflow
 	(i.e. the fetch source is equal to the push destination),
 	`upstream` is probably what you want.  Possible values are:
@@ -8,7 +9,7 @@ push.default::
 --
 
 * `nothing` - do not push anything (error out) unless a refspec is
-  explicitly given. This is primarily meant for people who want to
+  given. This is primarily meant for people who want to
   avoid mistakes by always being explicit.
 
 * `current` - push the current branch to update a branch with the same
@@ -23,15 +24,14 @@ push.default::
 
 * `tracking` - This is a deprecated synonym for `upstream`.
 
-* `simple` - in centralized workflow, work like `upstream` with an
-  added safety to refuse to push if the upstream branch's name is
-  different from the local one.
+* `simple` - pushes the current branch with the same name on the remote.
 +
-When pushing to a remote that is different from the remote you normally
-pull from, work as `current`.  This is the safest option and is suited
-for beginners.
+If you are working on a centralized workflow (pushing to the same repository you
+pull from, which is typically `origin`), then you need to configure an upstream
+branch with the same name.
 +
-This mode has become the default in Git 2.0.
+This mode is the default since Git 2.0, and is the safest option suited for
+beginners.
 
 * `matching` - push all branches having the same name on both ends.
   This makes the repository you are pushing to remember the set of
@@ -79,7 +79,7 @@ higher priority configuration file (e.g. `.git/config` in a
 repository) to clear the values inherited from a lower priority
 configuration files (e.g. `$HOME/.gitconfig`).
 +
---
+----
 
 Example:
 
@@ -96,7 +96,7 @@ repo/.git/config
 
 This will result in only b (a and c are cleared).
 
---
+----
 
 push.recurseSubmodules::
 	Make sure all submodule commits used by the revisions to be pushed
@@ -111,3 +111,18 @@ push.recurseSubmodules::
 	is 'no' then default behavior of ignoring submodules when pushing
 	is retained. You may override this configuration at time of push by
 	specifying '--recurse-submodules=check|on-demand|no'.
+	If not set, 'no' is used by default, unless 'submodule.recurse' is
+	set (in which case a 'true' value means 'on-demand').
+
+push.useForceIfIncludes::
+	If set to "true", it is equivalent to specifying
+	`--force-if-includes` as an option to linkgit:git-push[1]
+	in the command line. Adding `--no-force-if-includes` at the
+	time of push overrides this configuration setting.
+
+push.negotiate::
+	If set to "true", attempt to reduce the size of the packfile
+	sent by rounds of negotiation in which the client and the
+	server attempt to find commits in common. If "false", Git will
+	rely solely on the server's ref advertisement to find commits
+	in common.

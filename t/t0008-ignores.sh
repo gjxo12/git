@@ -2,6 +2,7 @@
 
 test_description=check-ignore
 
+TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 init_vars () {
@@ -34,7 +35,7 @@ expect_from_stdin () {
 test_stderr () {
 	expected="$1"
 	expect_in stderr "$1" &&
-	test_i18ncmp "$HOME/expected-stderr" "$HOME/stderr"
+	test_cmp "$HOME/expected-stderr" "$HOME/stderr"
 }
 
 broken_c_unquote () {
@@ -424,9 +425,24 @@ test_expect_success 'local ignore inside a sub-directory with --verbose' '
 	)
 '
 
-test_expect_success_multi 'nested include' \
-	'a/b/.gitignore:8:!on*	a/b/one' '
-	test_check_ignore "a/b/one"
+test_expect_success 'nested include of negated pattern' '
+	expect "" &&
+	test_check_ignore "a/b/one" 1
+'
+
+test_expect_success 'nested include of negated pattern with -q' '
+	expect "" &&
+	test_check_ignore "-q a/b/one" 1
+'
+
+test_expect_success 'nested include of negated pattern with -v' '
+	expect "a/b/.gitignore:8:!on*	a/b/one" &&
+	test_check_ignore "-v a/b/one" 0
+'
+
+test_expect_success 'nested include of negated pattern with -v -n' '
+	expect "a/b/.gitignore:8:!on*	a/b/one" &&
+	test_check_ignore "-v -n a/b/one" 0
 '
 
 ############################################################################
@@ -460,7 +476,6 @@ test_expect_success 'cd to ignored sub-directory' '
 	expect_from_stdin <<-\EOF &&
 		foo
 		twoooo
-		../one
 		seven
 		../../one
 	EOF
@@ -543,7 +558,6 @@ test_expect_success 'global ignore' '
 		globalthree
 		a/globalthree
 		a/per-repo
-		globaltwo
 	EOF
 	test_check_ignore "globalone per-repo globalthree a/globalthree a/per-repo not-ignored globaltwo"
 '
@@ -586,17 +600,7 @@ EOF
 cat <<-\EOF >expected-default
 	one
 	a/one
-	a/b/on
-	a/b/one
-	a/b/one one
-	a/b/one two
-	"a/b/one\"three"
-	a/b/two
 	a/b/twooo
-	globaltwo
-	a/globaltwo
-	a/b/globaltwo
-	b/globaltwo
 EOF
 cat <<-EOF >expected-verbose
 	.gitignore:1:one	one
@@ -696,8 +700,12 @@ cat <<-EOF >expected-all
 	$global_excludes:2:!globaltwo	../b/globaltwo
 	::	c/not-ignored
 EOF
+cat <<-EOF >expected-default
+../one
+one
+b/twooo
+EOF
 grep -v '^::	' expected-all >expected-verbose
-sed -e 's/.*	//' expected-verbose >expected-default
 
 broken_c_unquote stdin >stdin0
 
@@ -795,6 +803,32 @@ test_expect_success 'existing directory and file' '
 	grep top-level-dir actual
 '
 
+test_expect_success 'exact prefix matching (with root)' '
+	test_when_finished rm -r a &&
+	mkdir -p a/git a/git-foo &&
+	touch a/git/foo a/git-foo/bar &&
+	echo /git/ >a/.gitignore &&
+	git check-ignore a/git a/git/foo a/git-foo a/git-foo/bar >actual &&
+	cat >expect <<-\EOF &&
+	a/git
+	a/git/foo
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'exact prefix matching (without root)' '
+	test_when_finished rm -r a &&
+	mkdir -p a/git a/git-foo &&
+	touch a/git/foo a/git-foo/bar &&
+	echo git/ >a/.gitignore &&
+	git check-ignore a/git a/git/foo a/git-foo a/git-foo/bar >actual &&
+	cat >expect <<-\EOF &&
+	a/git
+	a/git/foo
+	EOF
+	test_cmp expect actual
+'
+
 ############################################################################
 #
 # test whitespace handling
@@ -856,6 +890,40 @@ test_expect_success 'info/exclude trumps core.excludesfile' '
 
 	git status --porcelain usually-ignored >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success SYMLINKS 'set up ignore file for symlink tests' '
+	echo "*" >ignore &&
+	rm -f .gitignore .git/info/exclude
+'
+
+test_expect_success SYMLINKS 'symlinks respected in core.excludesFile' '
+	test_when_finished "rm symlink" &&
+	ln -s ignore symlink &&
+	test_config core.excludesFile "$(pwd)/symlink" &&
+	echo file >expect &&
+	git check-ignore file >actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err
+'
+
+test_expect_success SYMLINKS 'symlinks respected in info/exclude' '
+	test_when_finished "rm .git/info/exclude" &&
+	ln -s ../../ignore .git/info/exclude &&
+	echo file >expect &&
+	git check-ignore file >actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err
+'
+
+test_expect_success SYMLINKS 'symlinks not respected in-tree' '
+	test_when_finished "rm .gitignore" &&
+	ln -s ignore .gitignore &&
+	mkdir subdir &&
+	ln -s ignore subdir/.gitignore &&
+	test_must_fail git check-ignore subdir/file >actual 2>err &&
+	test_must_be_empty actual &&
+	test_i18ngrep "unable to access.*gitignore" err
 '
 
 test_done

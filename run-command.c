@@ -2,23 +2,25 @@
 #include "run-command.h"
 #include "exec-cmd.h"
 #include "sigchain.h"
-#include "argv-array.h"
+#include "strvec.h"
 #include "thread-utils.h"
 #include "strbuf.h"
 #include "string-list.h"
 #include "quote.h"
+#include "config.h"
+#include "packfile.h"
+#include "hook.h"
 
 void child_process_init(struct child_process *child)
 {
-	memset(child, 0, sizeof(*child));
-	argv_array_init(&child->args);
-	argv_array_init(&child->env_array);
+	struct child_process blank = CHILD_PROCESS_INIT;
+	memcpy(child, &blank, sizeof(*child));
 }
 
 void child_process_clear(struct child_process *child)
 {
-	argv_array_clear(&child->args);
-	argv_array_clear(&child->env_array);
+	strvec_clear(&child->args);
+	strvec_clear(&child->env_array);
 }
 
 struct child_to_clean {
@@ -210,17 +212,38 @@ static char *locate_in_PATH(const char *file)
 	return NULL;
 }
 
-static int exists_in_PATH(const char *file)
+int exists_in_PATH(const char *command)
 {
-	char *r = locate_in_PATH(file);
+	char *r = locate_in_PATH(command);
+	int found = r != NULL;
 	free(r);
-	return r != NULL;
+	return found;
 }
 
 int sane_execvp(const char *file, char * const argv[])
 {
+#ifndef GIT_WINDOWS_NATIVE
+	/*
+	 * execvp() doesn't return, so we all we can do is tell trace2
+	 * what we are about to do and let it leave a hint in the log
+	 * (unless of course the execvp() fails).
+	 *
+	 * we skip this for Windows because the compat layer already
+	 * has to emulate the execvp() call anyway.
+	 */
+	int exec_id = trace2_exec(file, (const char **)argv);
+#endif
+
 	if (!execvp(file, argv))
 		return 0; /* cannot happen ;-) */
+
+#ifndef GIT_WINDOWS_NATIVE
+	{
+		int ec = errno;
+		trace2_exec_result(exec_id, ec);
+		errno = ec;
+	}
+#endif
 
 	/*
 	 * When a command can't be found because one of the directories
@@ -242,31 +265,31 @@ int sane_execvp(const char *file, char * const argv[])
 	return -1;
 }
 
-static const char **prepare_shell_cmd(struct argv_array *out, const char **argv)
+static const char **prepare_shell_cmd(struct strvec *out, const char **argv)
 {
 	if (!argv[0])
 		BUG("shell command is empty");
 
 	if (strcspn(argv[0], "|&;<>()$`\\\"' \t\n*?[#~=%") != strlen(argv[0])) {
 #ifndef GIT_WINDOWS_NATIVE
-		argv_array_push(out, SHELL_PATH);
+		strvec_push(out, SHELL_PATH);
 #else
-		argv_array_push(out, "sh");
+		strvec_push(out, "sh");
 #endif
-		argv_array_push(out, "-c");
+		strvec_push(out, "-c");
 
 		/*
 		 * If we have no extra arguments, we do not even need to
 		 * bother with the "$@" magic.
 		 */
 		if (!argv[1])
-			argv_array_push(out, argv[0]);
+			strvec_push(out, argv[0]);
 		else
-			argv_array_pushf(out, "%s \"$@\"", argv[0]);
+			strvec_pushf(out, "%s \"$@\"", argv[0]);
 	}
 
-	argv_array_pushv(out, argv);
-	return out->argv;
+	strvec_pushv(out, argv);
+	return out->v;
 }
 
 #ifndef GIT_WINDOWS_NATIVE
@@ -380,7 +403,7 @@ static void child_err_spew(struct child_process *cmd, struct child_err *cerr)
 	set_error_routine(old_errfn);
 }
 
-static int prepare_cmd(struct argv_array *out, const struct child_process *cmd)
+static int prepare_cmd(struct strvec *out, const struct child_process *cmd)
 {
 	if (!cmd->argv[0])
 		BUG("command is empty");
@@ -389,30 +412,29 @@ static int prepare_cmd(struct argv_array *out, const struct child_process *cmd)
 	 * Add SHELL_PATH so in the event exec fails with ENOEXEC we can
 	 * attempt to interpret the command with 'sh'.
 	 */
-	argv_array_push(out, SHELL_PATH);
+	strvec_push(out, SHELL_PATH);
 
 	if (cmd->git_cmd) {
-		argv_array_push(out, "git");
-		argv_array_pushv(out, cmd->argv);
+		prepare_git_cmd(out, cmd->argv);
 	} else if (cmd->use_shell) {
 		prepare_shell_cmd(out, cmd->argv);
 	} else {
-		argv_array_pushv(out, cmd->argv);
+		strvec_pushv(out, cmd->argv);
 	}
 
 	/*
-	 * If there are no '/' characters in the command then perform a path
-	 * lookup and use the resolved path as the command to exec.  If there
-	 * are '/' characters, we have exec attempt to invoke the command
-	 * directly.
+	 * If there are no dir separator characters in the command then perform
+	 * a path lookup and use the resolved path as the command to exec. If
+	 * there are dir separator characters, we have exec attempt to invoke
+	 * the command directly.
 	 */
-	if (!strchr(out->argv[1], '/')) {
-		char *program = locate_in_PATH(out->argv[1]);
+	if (!has_dir_sep(out->v[1])) {
+		char *program = locate_in_PATH(out->v[1]);
 		if (program) {
-			free((char *)out->argv[1]);
-			out->argv[1] = program;
+			free((char *)out->v[1]);
+			out->v[1] = program;
 		} else {
-			argv_array_clear(out);
+			strvec_clear(out);
 			errno = ENOENT;
 			return -1;
 		}
@@ -530,8 +552,11 @@ static int wait_or_whine(pid_t pid, const char *argv0, int in_signal)
 
 	while ((waiting = waitpid(pid, &status, 0)) < 0 && errno == EINTR)
 		;	/* nothing */
-	if (in_signal)
-		return 0;
+	if (in_signal) {
+		if (WIFEXITED(status))
+			code = WEXITSTATUS(status);
+		return code;
+	}
 
 	if (waiting < 0) {
 		failed_errno = errno;
@@ -652,9 +677,9 @@ int start_command(struct child_process *cmd)
 	char *str;
 
 	if (!cmd->argv)
-		cmd->argv = cmd->args.argv;
+		cmd->argv = cmd->args.v;
 	if (!cmd->env)
-		cmd->env = cmd->env_array.argv;
+		cmd->env = cmd->env_array.v;
 
 	/*
 	 * In case of errors we must keep the promise to close FDs
@@ -712,16 +737,20 @@ fail_pipe:
 		cmd->err = fderr[0];
 	}
 
+	trace2_child_start(cmd);
 	trace_run_command(cmd);
 
 	fflush(NULL);
+
+	if (cmd->close_object_store)
+		close_object_store(the_repository->objects);
 
 #ifndef GIT_WINDOWS_NATIVE
 {
 	int notify_pipe[2];
 	int null_fd = -1;
 	char **childenv;
-	struct argv_array argv = ARGV_ARRAY_INIT;
+	struct strvec argv = STRVEC_INIT;
 	struct child_err cerr;
 	struct atfork_state as;
 
@@ -737,9 +766,7 @@ fail_pipe:
 		notify_pipe[0] = notify_pipe[1] = -1;
 
 	if (cmd->no_stdin || cmd->no_stdout || cmd->no_stderr) {
-		null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
-		if (null_fd < 0)
-			die_errno(_("open /dev/null failed"));
+		null_fd = xopen("/dev/null", O_RDWR | O_CLOEXEC);
 		set_cloexec(null_fd);
 	}
 
@@ -825,10 +852,10 @@ fail_pipe:
 		 * be used in the event exec failed with ENOEXEC at which point
 		 * we will try to interpret the command using 'sh'.
 		 */
-		execve(argv.argv[1], (char *const *) argv.argv + 1,
+		execve(argv.v[1], (char *const *) argv.v + 1,
 		       (char *const *) childenv);
 		if (errno == ENOEXEC)
-			execve(argv.argv[0], (char *const *) argv.argv,
+			execve(argv.v[0], (char *const *) argv.v,
 			       (char *const *) childenv);
 
 		if (errno == ENOENT) {
@@ -867,7 +894,7 @@ fail_pipe:
 
 	if (null_fd >= 0)
 		close(null_fd);
-	argv_array_clear(&argv);
+	strvec_clear(&argv);
 	free(childenv);
 }
 end_of_spawn:
@@ -876,7 +903,7 @@ end_of_spawn:
 {
 	int fhin = 0, fhout = 1, fherr = 2;
 	const char **sargv = cmd->argv;
-	struct argv_array nargv = ARGV_ARRAY_INIT;
+	struct strvec nargv = STRVEC_INIT;
 
 	if (cmd->no_stdin)
 		fhin = open("/dev/null", O_RDWR);
@@ -914,7 +941,7 @@ end_of_spawn:
 	if (cmd->clean_on_exit && cmd->pid >= 0)
 		mark_child_for_cleanup(cmd->pid, cmd);
 
-	argv_array_clear(&nargv);
+	strvec_clear(&nargv);
 	cmd->argv = sargv;
 	if (fhin != 0)
 		close(fhin);
@@ -926,6 +953,8 @@ end_of_spawn:
 #endif
 
 	if (cmd->pid < 0) {
+		trace2_child_exit(cmd, -1);
+
 		if (need_in)
 			close_pair(fdin);
 		else if (cmd->in)
@@ -964,13 +993,17 @@ end_of_spawn:
 int finish_command(struct child_process *cmd)
 {
 	int ret = wait_or_whine(cmd->pid, cmd->argv[0], 0);
+	trace2_child_exit(cmd, ret);
 	child_process_clear(cmd);
+	invalidate_lstat_cache();
 	return ret;
 }
 
 int finish_command_in_signal(struct child_process *cmd)
 {
-	return wait_or_whine(cmd->pid, cmd->argv[0], 1);
+	int ret = wait_or_whine(cmd->pid, cmd->argv[0], 1);
+	trace2_child_exit(cmd, ret);
+	return ret;
 }
 
 
@@ -992,7 +1025,18 @@ int run_command_v_opt(const char **argv, int opt)
 	return run_command_v_opt_cd_env(argv, opt, NULL, NULL);
 }
 
+int run_command_v_opt_tr2(const char **argv, int opt, const char *tr2_class)
+{
+	return run_command_v_opt_cd_env_tr2(argv, opt, NULL, NULL, tr2_class);
+}
+
 int run_command_v_opt_cd_env(const char **argv, int opt, const char *dir, const char *const *env)
+{
+	return run_command_v_opt_cd_env_tr2(argv, opt, dir, env, NULL);
+}
+
+int run_command_v_opt_cd_env_tr2(const char **argv, int opt, const char *dir,
+				 const char *const *env, const char *tr2_class)
 {
 	struct child_process cmd = CHILD_PROCESS_INIT;
 	cmd.argv = argv;
@@ -1002,8 +1046,11 @@ int run_command_v_opt_cd_env(const char **argv, int opt, const char *dir, const 
 	cmd.silent_exec_failure = opt & RUN_SILENT_EXEC_FAILURE ? 1 : 0;
 	cmd.use_shell = opt & RUN_USING_SHELL ? 1 : 0;
 	cmd.clean_on_exit = opt & RUN_CLEAN_ON_EXIT ? 1 : 0;
+	cmd.wait_after_clean = opt & RUN_WAIT_AFTER_CLEAN ? 1 : 0;
+	cmd.close_object_store = opt & RUN_CLOSE_OBJECT_STORE ? 1 : 0;
 	cmd.dir = dir;
 	cmd.env = env;
+	cmd.trace2_child_class = tr2_class;
 	return run_command(&cmd);
 }
 
@@ -1052,7 +1099,7 @@ static NORETURN void die_async(const char *err, va_list params)
 static int async_die_is_recursing(void)
 {
 	void *ret = pthread_getspecific(async_die_counter);
-	pthread_setspecific(async_die_counter, (void *)1);
+	pthread_setspecific(async_die_counter, &async_die_counter); /* set to any non-NULL valid pointer */
 	return ret != NULL;
 }
 
@@ -1251,13 +1298,19 @@ error:
 int finish_async(struct async *async)
 {
 #ifdef NO_PTHREADS
-	return wait_or_whine(async->pid, "child process", 0);
+	int ret = wait_or_whine(async->pid, "child process", 0);
+
+	invalidate_lstat_cache();
+
+	return ret;
 #else
 	void *ret = (void *)(intptr_t)(-1);
 
 	if (pthread_join(async->tid, &ret))
 		error("pthread_join failed");
+	invalidate_lstat_cache();
 	return (int)(intptr_t)ret;
+
 #endif
 }
 
@@ -1270,40 +1323,6 @@ int async_with_fork(void)
 #endif
 }
 
-const char *find_hook(const char *name)
-{
-	static struct strbuf path = STRBUF_INIT;
-
-	strbuf_reset(&path);
-	strbuf_git_path(&path, "hooks/%s", name);
-	if (access(path.buf, X_OK) < 0) {
-		int err = errno;
-
-#ifdef STRIP_EXTENSION
-		strbuf_addstr(&path, STRIP_EXTENSION);
-		if (access(path.buf, X_OK) >= 0)
-			return path.buf;
-		if (errno == EACCES)
-			err = errno;
-#endif
-
-		if (err == EACCES && advice_ignored_hook) {
-			static struct string_list advise_given = STRING_LIST_INIT_DUP;
-
-			if (!string_list_lookup(&advise_given, name)) {
-				string_list_insert(&advise_given, name);
-				advise(_("The '%s' hook was ignored because "
-					 "it's not set as executable.\n"
-					 "You can disable this warning with "
-					 "`git config advice.ignoredHook false`."),
-				       path.buf);
-			}
-		}
-		return NULL;
-	}
-	return path.buf;
-}
-
 int run_hook_ve(const char *const *env, const char *name, va_list args)
 {
 	struct child_process hook = CHILD_PROCESS_INIT;
@@ -1313,12 +1332,13 @@ int run_hook_ve(const char *const *env, const char *name, va_list args)
 	if (!p)
 		return 0;
 
-	argv_array_push(&hook.args, p);
+	strvec_push(&hook.args, p);
 	while ((p = va_arg(args, const char *)))
-		argv_array_push(&hook.args, p);
+		strvec_push(&hook.args, p);
 	hook.env = env;
 	hook.no_stdin = 1;
 	hook.stdout_to_stderr = 1;
+	hook.trace2_hook_name = name;
 
 	return run_command(&hook);
 }
@@ -1587,8 +1607,8 @@ static void pp_init(struct parallel_processes *pp,
 	pp->nr_processes = 0;
 	pp->output_owner = 0;
 	pp->shutdown = 0;
-	pp->children = xcalloc(n, sizeof(*pp->children));
-	pp->pfd = xcalloc(n, sizeof(*pp->pfd));
+	CALLOC_ARRAY(pp->children, n);
+	CALLOC_ARRAY(pp->pfd, n);
 	strbuf_init(&pp->buffered_output, 0);
 
 	for (i = 0; i < n; i++) {
@@ -1806,4 +1826,180 @@ int run_processes_parallel(int n,
 
 	pp_cleanup(&pp);
 	return 0;
+}
+
+int run_processes_parallel_tr2(int n, get_next_task_fn get_next_task,
+			       start_failure_fn start_failure,
+			       task_finished_fn task_finished, void *pp_cb,
+			       const char *tr2_category, const char *tr2_label)
+{
+	int result;
+
+	trace2_region_enter_printf(tr2_category, tr2_label, NULL, "max:%d",
+				   ((n < 1) ? online_cpus() : n));
+
+	result = run_processes_parallel(n, get_next_task, start_failure,
+					task_finished, pp_cb);
+
+	trace2_region_leave(tr2_category, tr2_label, NULL);
+
+	return result;
+}
+
+int run_auto_maintenance(int quiet)
+{
+	int enabled;
+	struct child_process maint = CHILD_PROCESS_INIT;
+
+	if (!git_config_get_bool("maintenance.auto", &enabled) &&
+	    !enabled)
+		return 0;
+
+	maint.git_cmd = 1;
+	maint.close_object_store = 1;
+	strvec_pushl(&maint.args, "maintenance", "run", "--auto", NULL);
+	strvec_push(&maint.args, quiet ? "--quiet" : "--no-quiet");
+
+	return run_command(&maint);
+}
+
+void prepare_other_repo_env(struct strvec *env_array, const char *new_git_dir)
+{
+	const char * const *var;
+
+	for (var = local_repo_env; *var; var++) {
+		if (strcmp(*var, CONFIG_DATA_ENVIRONMENT) &&
+		    strcmp(*var, CONFIG_COUNT_ENVIRONMENT))
+			strvec_push(env_array, *var);
+	}
+	strvec_pushf(env_array, "%s=%s", GIT_DIR_ENVIRONMENT, new_git_dir);
+}
+
+enum start_bg_result start_bg_command(struct child_process *cmd,
+				      start_bg_wait_cb *wait_cb,
+				      void *cb_data,
+				      unsigned int timeout_sec)
+{
+	enum start_bg_result sbgr = SBGR_ERROR;
+	int ret;
+	int wait_status;
+	pid_t pid_seen;
+	time_t time_limit;
+
+	/*
+	 * We do not allow clean-on-exit because the child process
+	 * should persist in the background and possibly/probably
+	 * after this process exits.  So we don't want to kill the
+	 * child during our atexit routine.
+	 */
+	if (cmd->clean_on_exit)
+		BUG("start_bg_command() does not allow non-zero clean_on_exit");
+
+	if (!cmd->trace2_child_class)
+		cmd->trace2_child_class = "background";
+
+	ret = start_command(cmd);
+	if (ret) {
+		/*
+		 * We assume that if `start_command()` fails, we
+		 * either get a complete `trace2_child_start() /
+		 * trace2_child_exit()` pair or it fails before the
+		 * `trace2_child_start()` is emitted, so we do not
+		 * need to worry about it here.
+		 *
+		 * We also assume that `start_command()` does not add
+		 * us to the cleanup list.  And that it calls
+		 * calls `child_process_clear()`.
+		 */
+		sbgr = SBGR_ERROR;
+		goto done;
+	}
+
+	time(&time_limit);
+	time_limit += timeout_sec;
+
+wait:
+	pid_seen = waitpid(cmd->pid, &wait_status, WNOHANG);
+
+	if (!pid_seen) {
+		/*
+		 * The child is currently running.  Ask the callback
+		 * if the child is ready to do work or whether we
+		 * should keep waiting for it to boot up.
+		 */
+		ret = (*wait_cb)(cmd, cb_data);
+		if (!ret) {
+			/*
+			 * The child is running and "ready".
+			 */
+			trace2_child_ready(cmd, "ready");
+			sbgr = SBGR_READY;
+			goto done;
+		} else if (ret > 0) {
+			/*
+			 * The callback said to give it more time to boot up
+			 * (subject to our timeout limit).
+			 */
+			time_t now;
+
+			time(&now);
+			if (now < time_limit)
+				goto wait;
+
+			/*
+			 * Our timeout has expired.  We don't try to
+			 * kill the child, but rather let it continue
+			 * (hopefully) trying to startup.
+			 */
+			trace2_child_ready(cmd, "timeout");
+			sbgr = SBGR_TIMEOUT;
+			goto done;
+		} else {
+			/*
+			 * The cb gave up on this child.  It is still running,
+			 * but our cb got an error trying to probe it.
+			 */
+			trace2_child_ready(cmd, "error");
+			sbgr = SBGR_CB_ERROR;
+			goto done;
+		}
+	}
+
+	else if (pid_seen == cmd->pid) {
+		int child_code = -1;
+
+		/*
+		 * The child started, but exited or was terminated
+		 * before becoming "ready".
+		 *
+		 * We try to match the behavior of `wait_or_whine()`
+		 * WRT the handling of WIFSIGNALED() and WIFEXITED()
+		 * and convert the child's status to a return code for
+		 * tracing purposes and emit the `trace2_child_exit()`
+		 * event.
+		 *
+		 * We do not want the wait_or_whine() error message
+		 * because we will be called by client-side library
+		 * routines.
+		 */
+		if (WIFEXITED(wait_status))
+			child_code = WEXITSTATUS(wait_status);
+		else if (WIFSIGNALED(wait_status))
+			child_code = WTERMSIG(wait_status) + 128;
+		trace2_child_exit(cmd, child_code);
+
+		sbgr = SBGR_DIED;
+		goto done;
+	}
+
+	else if (pid_seen < 0 && errno == EINTR)
+		goto wait;
+
+	trace2_child_exit(cmd, -1);
+	sbgr = SBGR_ERROR;
+
+done:
+	child_process_clear(cmd);
+	invalidate_lstat_cache();
+	return sbgr;
 }

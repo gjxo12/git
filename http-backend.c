@@ -9,7 +9,7 @@
 #include "run-command.h"
 #include "string-list.h"
 #include "url.h"
-#include "argv-array.h"
+#include "strvec.h"
 #include "packfile.h"
 #include "object-store.h"
 #include "protocol.h"
@@ -39,7 +39,7 @@ static struct string_list *get_parameters(void)
 	if (!query_params) {
 		const char *query = getenv("QUERY_STRING");
 
-		query_params = xcalloc(1, sizeof(*query_params));
+		CALLOC_ARRAY(query_params, 1);
 		while (query && *query) {
 			char *name = url_decode_parameter_name(&query);
 			char *value = url_decode_parameter_value(&query);
@@ -466,9 +466,7 @@ static void run_service(const char **argv, int buffer_input)
 	struct child_process cld = CHILD_PROCESS_INIT;
 	ssize_t req_len = get_content_length();
 
-	if (encoding && !strcmp(encoding, "gzip"))
-		gzipped_request = 1;
-	else if (encoding && !strcmp(encoding, "x-gzip"))
+	if (encoding && (!strcmp(encoding, "gzip") || !strcmp(encoding, "x-gzip")))
 		gzipped_request = 1;
 
 	if (!user || !*user)
@@ -477,10 +475,10 @@ static void run_service(const char **argv, int buffer_input)
 		host = "(none)";
 
 	if (!getenv("GIT_COMMITTER_NAME"))
-		argv_array_pushf(&cld.env_array, "GIT_COMMITTER_NAME=%s", user);
+		strvec_pushf(&cld.env_array, "GIT_COMMITTER_NAME=%s", user);
 	if (!getenv("GIT_COMMITTER_EMAIL"))
-		argv_array_pushf(&cld.env_array,
-				 "GIT_COMMITTER_EMAIL=%s@http.%s", user, host);
+		strvec_pushf(&cld.env_array,
+			     "GIT_COMMITTER_EMAIL=%s@http.%s", user, host);
 
 	cld.argv = argv;
 	if (buffer_input || gzipped_request || req_len >= 0)
@@ -534,7 +532,7 @@ static void get_info_refs(struct strbuf *hdr, char *arg)
 
 	if (service_name) {
 		const char *argv[] = {NULL /* service name */,
-			"--stateless-rpc", "--advertise-refs",
+			"--http-backend-info-refs",
 			".", NULL};
 		struct rpc_service *svc = select_service(hdr, service_name);
 
@@ -711,8 +709,11 @@ static struct service_cmd {
 	{"GET", "/objects/info/http-alternates$", get_text_file},
 	{"GET", "/objects/info/packs$", get_info_packs},
 	{"GET", "/objects/[0-9a-f]{2}/[0-9a-f]{38}$", get_loose_object},
+	{"GET", "/objects/[0-9a-f]{2}/[0-9a-f]{62}$", get_loose_object},
 	{"GET", "/objects/pack/pack-[0-9a-f]{40}\\.pack$", get_pack_file},
+	{"GET", "/objects/pack/pack-[0-9a-f]{64}\\.pack$", get_pack_file},
 	{"GET", "/objects/pack/pack-[0-9a-f]{40}\\.idx$", get_idx_file},
+	{"GET", "/objects/pack/pack-[0-9a-f]{64}\\.idx$", get_idx_file},
 
 	{"POST", "/git-upload-pack$", service_rpc},
 	{"POST", "/git-receive-pack$", service_rpc}
@@ -736,6 +737,7 @@ static int bad_request(struct strbuf *hdr, const struct service_cmd *c)
 int cmd_main(int argc, const char **argv)
 {
 	char *method = getenv("REQUEST_METHOD");
+	const char *proto_header;
 	char *dir;
 	struct service_cmd *cmd = NULL;
 	char *cmd_arg = NULL;
@@ -786,6 +788,9 @@ int cmd_main(int argc, const char **argv)
 	http_config();
 	max_request_buffer = git_env_ulong("GIT_HTTP_MAX_REQUEST_BUFFER",
 					   max_request_buffer);
+	proto_header = getenv("HTTP_GIT_PROTOCOL");
+	if (proto_header)
+		setenv(GIT_PROTOCOL_ENVIRONMENT, proto_header, 0);
 
 	cmd->imp(&hdr, cmd_arg);
 	return 0;

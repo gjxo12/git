@@ -29,14 +29,14 @@ void init_notes_merge_options(struct repository *r,
 
 static int path_to_oid(const char *path, struct object_id *oid)
 {
-	char hex_oid[GIT_SHA1_HEXSZ];
+	char hex_oid[GIT_MAX_HEXSZ];
 	int i = 0;
-	while (*path && i < GIT_SHA1_HEXSZ) {
+	while (*path && i < the_hash_algo->hexsz) {
 		if (*path != '/')
 			hex_oid[i++] = *path;
 		path++;
 	}
-	if (*path || i != GIT_SHA1_HEXSZ)
+	if (*path || i != the_hash_algo->hexsz)
 		return -1;
 	return get_oid_hex(hex_oid, oid);
 }
@@ -136,7 +136,7 @@ static struct notes_merge_pair *diff_tree_remote(struct notes_merge_options *o,
 	diff_tree_oid(base, remote, "", &opt);
 	diffcore_std(&opt);
 
-	changes = xcalloc(diff_queued_diff.nr, sizeof(struct notes_merge_pair));
+	CALLOC_ARRAY(changes, diff_queued_diff.nr);
 
 	for (i = 0; i < diff_queued_diff.nr; i++) {
 		struct diff_filepair *p = diff_queued_diff.queue[i];
@@ -273,7 +273,7 @@ static void check_notes_merge_worktree(struct notes_merge_options *o)
 		 */
 		if (file_exists(git_path(NOTES_MERGE_WORKTREE)) &&
 		    !is_empty_dir(git_path(NOTES_MERGE_WORKTREE))) {
-			if (advice_resolve_conflict)
+			if (advice_enabled(ADVICE_RESOLVE_CONFLICT))
 				die(_("You have not concluded your previous "
 				    "notes merge (%s exists).\nPlease, use "
 				    "'git notes merge --commit' or 'git notes "
@@ -600,7 +600,7 @@ int notes_merge(struct notes_merge_options *o,
 	/* Find merge bases */
 	bases = get_merge_bases(local, remote);
 	if (!bases) {
-		base_oid = &null_oid;
+		base_oid = null_oid();
 		base_tree_oid = the_hash_algo->empty_tree;
 		if (o->verbosity >= 4)
 			printf("No merge base found; doing history-less merge\n");
@@ -628,7 +628,7 @@ int notes_merge(struct notes_merge_options *o,
 	if (oideq(&remote->object.oid, base_oid)) {
 		/* Already merged; result == local commit */
 		if (o->verbosity >= 2)
-			printf("Already up to date!\n");
+			printf_ln("Already up to date.");
 		oidcpy(result_oid, &local->object.oid);
 		goto found_result;
 	}
@@ -649,7 +649,7 @@ int notes_merge(struct notes_merge_options *o,
 		struct commit_list *parents = NULL;
 		commit_list_insert(remote, &parents); /* LIFO order */
 		commit_list_insert(local, &parents);
-		create_notes_commit(local_tree, parents, o->commit_msg.buf,
+		create_notes_commit(o->repo, local_tree, parents, o->commit_msg.buf,
 				    o->commit_msg.len, result_oid);
 	}
 
@@ -695,12 +695,9 @@ int notes_merge_commit(struct notes_merge_options *o,
 
 	strbuf_addch(&path, '/');
 	baselen = path.len;
-	while ((e = readdir(dir)) != NULL) {
+	while ((e = readdir_skip_dot_and_dotdot(dir)) != NULL) {
 		struct stat st;
 		struct object_id obj_oid, blob_oid;
-
-		if (is_dot_or_dotdot(e->d_name))
-			continue;
 
 		if (get_oid_hex(e->d_name, &obj_oid)) {
 			if (o->verbosity >= 3)
@@ -724,7 +721,7 @@ int notes_merge_commit(struct notes_merge_options *o,
 		strbuf_setlen(&path, baselen);
 	}
 
-	create_notes_commit(partial_tree, partial_commit->parents, msg,
+	create_notes_commit(o->repo, partial_tree, partial_commit->parents, msg,
 			    strlen(msg), result_oid);
 	unuse_commit_buffer(partial_commit, buffer);
 	if (o->verbosity >= 4)

@@ -85,7 +85,7 @@ AC_DEFUN([GIT_PARSE_WITH],
 
 # GIT_PARSE_WITH_SET_MAKE_VAR(WITHNAME, VAR, HELP_TEXT)
 # -----------------------------------------------------
-# Set VAR to the value specied by --with-WITHNAME.
+# Set VAR to the value specified by --with-WITHNAME.
 # No verification of arguments is performed, but warnings are issued
 # if either 'yes' or 'no' is specified.
 # HELP_TEXT is presented when --help is called.
@@ -252,16 +252,17 @@ GIT_PARSE_WITH([openssl]))
 # Define USE_LIBPCRE if you have and want to use libpcre. Various
 # commands such as log and grep offer runtime options to use
 # Perl-compatible regular expressions instead of standard or extended
-# POSIX regular expressions.
-#
-# USE_LIBPCRE is a synonym for USE_LIBPCRE2, define USE_LIBPCRE1
-# instead if you'd like to use the legacy version 1 of the PCRE
-# library. Support for version 1 will likely be removed in some future
-# release of Git, as upstream has all but abandoned it.
+# POSIX regular expressions. Only libpcre version 2 is supported.
 #
 # Define LIBPCREDIR=/foo/bar if your PCRE header and library files are in
 # /foo/bar/include and /foo/bar/lib directories.
 #
+
+AC_ARG_WITH(libpcre1,
+AS_HELP_STRING([--with-libpcre1],[DEPRECATED]),
+    AC_MSG_ERROR([support for --with-libpcre1 has been removed. Use --with-libpcre2!])
+    )
+
 AC_ARG_WITH(libpcre,
 AS_HELP_STRING([--with-libpcre],[synonym for --with-libpcre2]),
     if test "$withval" = "no"; then
@@ -277,31 +278,11 @@ AS_HELP_STRING([--with-libpcre],[synonym for --with-libpcre2]),
 	GIT_CONF_SUBST([LIBPCREDIR])
     fi)
 
-AC_ARG_WITH(libpcre1,
-AS_HELP_STRING([--with-libpcre1],[support Perl-compatible regexes via libpcre1 (default is NO)])
-AS_HELP_STRING([],           [ARG can be also prefix for libpcre library and headers]),
-    if test "$withval" = "no"; then
-	USE_LIBPCRE1=
-    elif test "$withval" = "yes"; then
-	USE_LIBPCRE1=YesPlease
-    else
-	USE_LIBPCRE1=YesPlease
-	LIBPCREDIR=$withval
-	AC_MSG_NOTICE([Setting LIBPCREDIR to $LIBPCREDIR])
-        dnl USE_LIBPCRE1 can still be modified below, so don't substitute
-        dnl it yet.
-	GIT_CONF_SUBST([LIBPCREDIR])
-    fi)
-
 AC_ARG_WITH(libpcre2,
 AS_HELP_STRING([--with-libpcre2],[support Perl-compatible regexes via libpcre2 (default is NO)])
 AS_HELP_STRING([],           [ARG can be also prefix for libpcre library and headers]),
     if test -n "$USE_LIBPCRE2"; then
         AC_MSG_ERROR([Only supply one of --with-libpcre or its synonym --with-libpcre2!])
-    fi
-
-    if test -n "$USE_LIBPCRE1"; then
-        AC_MSG_ERROR([Only supply one of --with-libpcre1 or --with-libpcre2!])
     fi
 
     if test "$withval" = "no"; then
@@ -475,8 +456,18 @@ else
       if test "$git_cv_ld_rpath" = "yes"; then
          CC_LD_DYNPATH=-rpath
       else
-         CC_LD_DYNPATH=
-         AC_MSG_WARN([linker does not support runtime path to dynamic libraries])
+         AC_CACHE_CHECK([if linker supports -Wl,+b,], git_cv_ld_wl_b, [
+            SAVE_LDFLAGS="${LDFLAGS}"
+            LDFLAGS="${SAVE_LDFLAGS} -Wl,+b,/"
+            AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])], [git_cv_ld_wl_b=yes], [git_cv_ld_wl_b=no])
+            LDFLAGS="${SAVE_LDFLAGS}"
+         ])
+         if test "$git_cv_ld_wl_b" = "yes"; then
+            CC_LD_DYNPATH=-Wl,+b,
+          else
+             CC_LD_DYNPATH=
+             AC_MSG_WARN([linker does not support runtime path to dynamic libraries])
+          fi
       fi
    fi
 fi
@@ -544,24 +535,8 @@ GIT_CONF_SUBST([NEEDS_SSL_WITH_CRYPTO])
 GIT_CONF_SUBST([NO_OPENSSL])
 
 #
-# Handle the USE_LIBPCRE1 and USE_LIBPCRE2 options potentially set
-# above.
+# Handle the USE_LIBPCRE options potentially set above.
 #
-
-if test -n "$USE_LIBPCRE1"; then
-
-GIT_STASH_FLAGS($LIBPCREDIR)
-
-AC_CHECK_LIB([pcre], [pcre_version],
-[USE_LIBPCRE1=YesPlease],
-[USE_LIBPCRE1=])
-
-GIT_UNSTASH_FLAGS($LIBPCREDIR)
-
-GIT_CONF_SUBST([USE_LIBPCRE1])
-
-fi
-
 
 if test -n "$USE_LIBPCRE2"; then
 
@@ -763,9 +738,19 @@ AC_CHECK_LIB([c], [basename],
 GIT_CONF_SUBST([NEEDS_LIBGEN])
 test -n "$NEEDS_LIBGEN" && LIBS="$LIBS -lgen"
 
-AC_CHECK_LIB([c], [gettext],
-[LIBC_CONTAINS_LIBINTL=YesPlease],
-[LIBC_CONTAINS_LIBINTL=])
+AC_DEFUN([LIBINTL_SRC], [
+AC_LANG_PROGRAM([[
+#include <libintl.h>
+]],[[
+char *msg = gettext("test");
+]])])
+
+AC_MSG_CHECKING([if libc contains libintl])
+AC_LINK_IFELSE([LIBINTL_SRC],
+	[AC_MSG_RESULT([yes])
+	LIBC_CONTAINS_LIBINTL=YesPlease],
+	[AC_MSG_RESULT([no])
+	LIBC_CONTAINS_LIBINTL=])
 GIT_CONF_SUBST([LIBC_CONTAINS_LIBINTL])
 
 #
@@ -824,11 +809,60 @@ AC_MSG_CHECKING([for old iconv()])
 AC_COMPILE_IFELSE([OLDICONVTEST_SRC],
 	[AC_MSG_RESULT([no])],
 	[AC_MSG_RESULT([yes])
+	AC_DEFINE(HAVE_OLD_ICONV, 1)
 	OLD_ICONV=UnfortunatelyYes])
 
 GIT_UNSTASH_FLAGS($ICONVDIR)
 
 GIT_CONF_SUBST([OLD_ICONV])
+
+#
+# Define ICONV_OMITS_BOM if you are on a system which
+# iconv omits bom for utf-{16,32}
+if test -z "$NO_ICONV"; then
+AC_CACHE_CHECK([whether iconv omits bom for utf-16 and utf-32],
+ [ac_cv_iconv_omits_bom],
+[
+old_LIBS="$LIBS"
+if test -n "$NEEDS_LIBICONV"; then
+	LIBS="$LIBS -liconv"
+fi
+
+AC_RUN_IFELSE(
+	[AC_LANG_PROGRAM([AC_INCLUDES_DEFAULT
+	#include <iconv.h>
+	#ifdef HAVE_OLD_ICONV
+	typedef const char *iconv_ibp;
+	#else
+	typedef char *iconv_ibp;
+	#endif
+	],
+	[[
+	int v;
+	iconv_t conv;
+	char in[] = "a"; iconv_ibp pin = in;
+	char out[20] = ""; char *pout = out;
+	size_t isz = sizeof in;
+	size_t osz = sizeof out;
+
+	conv = iconv_open("UTF-16", "UTF-8");
+	iconv(conv, &pin, &isz, &pout, &osz);
+	iconv_close(conv);
+	v = (unsigned char)(out[0]) + (unsigned char)(out[1]);
+	return v != 0xfe + 0xff;
+	]])],
+	[ac_cv_iconv_omits_bom=no],
+	[ac_cv_iconv_omits_bom=yes])
+
+LIBS="$old_LIBS"
+])
+if test "x$ac_cv_iconv_omits_bom" = xyes; then
+	ICONV_OMITS_BOM=Yes
+else
+	ICONV_OMITS_BOM=
+fi
+GIT_CONF_SUBST([ICONV_OMITS_BOM])
+fi
 
 ## Checks for typedefs, structures, and compiler characteristics.
 AC_MSG_NOTICE([CHECKS for typedefs, structures, and compiler characteristics])

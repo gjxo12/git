@@ -183,12 +183,10 @@ static inline void packing_data_unlock(struct packing_data *pdata)
 }
 
 struct object_entry *packlist_alloc(struct packing_data *pdata,
-				    const unsigned char *sha1,
-				    uint32_t index_pos);
+				    const struct object_id *oid);
 
 struct object_entry *packlist_find(struct packing_data *pdata,
-				   const unsigned char *sha1,
-				   uint32_t *index_pos);
+				   const struct object_id *oid);
 
 static inline uint32_t pack_name_hash(const char *name)
 {
@@ -247,165 +245,32 @@ static inline struct packed_git *oe_in_pack(const struct packing_data *pack,
 		return pack->in_pack[e - pack->objects];
 }
 
-void oe_map_new_pack(struct packing_data *pack,
-		     struct packed_git *p);
+void oe_map_new_pack(struct packing_data *pack);
+
 static inline void oe_set_in_pack(struct packing_data *pack,
 				  struct object_entry *e,
 				  struct packed_git *p)
 {
-	if (!p->index)
-		oe_map_new_pack(pack, p);
-	if (pack->in_pack_by_idx)
-		e->in_pack_idx = p->index;
-	else
-		pack->in_pack[e - pack->objects] = p;
-}
-
-static inline struct object_entry *oe_delta(
-		const struct packing_data *pack,
-		const struct object_entry *e)
-{
-	if (!e->delta_idx)
-		return NULL;
-	if (e->ext_base)
-		return &pack->ext_bases[e->delta_idx - 1];
-	else
-		return &pack->objects[e->delta_idx - 1];
-}
-
-static inline void oe_set_delta(struct packing_data *pack,
-				struct object_entry *e,
-				struct object_entry *delta)
-{
-	if (delta)
-		e->delta_idx = (delta - pack->objects) + 1;
-	else
-		e->delta_idx = 0;
+	if (pack->in_pack_by_idx) {
+		if (p->index) {
+			e->in_pack_idx = p->index;
+			return;
+		}
+		/*
+		 * We're accessing packs by index, but this pack doesn't have
+		 * an index (e.g., because it was added since we created the
+		 * in_pack_by_idx array). Bail to oe_map_new_pack(), which
+		 * will convert us to using the full in_pack array, and then
+		 * fall through to our in_pack handling.
+		 */
+		oe_map_new_pack(pack);
+	}
+	pack->in_pack[e - pack->objects] = p;
 }
 
 void oe_set_delta_ext(struct packing_data *pack,
 		      struct object_entry *e,
-		      const unsigned char *sha1);
-
-static inline struct object_entry *oe_delta_child(
-		const struct packing_data *pack,
-		const struct object_entry *e)
-{
-	if (e->delta_child_idx)
-		return &pack->objects[e->delta_child_idx - 1];
-	return NULL;
-}
-
-static inline void oe_set_delta_child(struct packing_data *pack,
-				      struct object_entry *e,
-				      struct object_entry *delta)
-{
-	if (delta)
-		e->delta_child_idx = (delta - pack->objects) + 1;
-	else
-		e->delta_child_idx = 0;
-}
-
-static inline struct object_entry *oe_delta_sibling(
-		const struct packing_data *pack,
-		const struct object_entry *e)
-{
-	if (e->delta_sibling_idx)
-		return &pack->objects[e->delta_sibling_idx - 1];
-	return NULL;
-}
-
-static inline void oe_set_delta_sibling(struct packing_data *pack,
-					struct object_entry *e,
-					struct object_entry *delta)
-{
-	if (delta)
-		e->delta_sibling_idx = (delta - pack->objects) + 1;
-	else
-		e->delta_sibling_idx = 0;
-}
-
-unsigned long oe_get_size_slow(struct packing_data *pack,
-			       const struct object_entry *e);
-static inline unsigned long oe_size(struct packing_data *pack,
-				    const struct object_entry *e)
-{
-	if (e->size_valid)
-		return e->size_;
-
-	return oe_get_size_slow(pack, e);
-}
-
-static inline int oe_size_less_than(struct packing_data *pack,
-				    const struct object_entry *lhs,
-				    unsigned long rhs)
-{
-	if (lhs->size_valid)
-		return lhs->size_ < rhs;
-	if (rhs < pack->oe_size_limit) /* rhs < 2^x <= lhs ? */
-		return 0;
-	return oe_get_size_slow(pack, lhs) < rhs;
-}
-
-static inline int oe_size_greater_than(struct packing_data *pack,
-				       const struct object_entry *lhs,
-				       unsigned long rhs)
-{
-	if (lhs->size_valid)
-		return lhs->size_ > rhs;
-	if (rhs < pack->oe_size_limit) /* rhs < 2^x <= lhs ? */
-		return 1;
-	return oe_get_size_slow(pack, lhs) > rhs;
-}
-
-static inline void oe_set_size(struct packing_data *pack,
-			       struct object_entry *e,
-			       unsigned long size)
-{
-	if (size < pack->oe_size_limit) {
-		e->size_ = size;
-		e->size_valid = 1;
-	} else {
-		e->size_valid = 0;
-		if (oe_get_size_slow(pack, e) != size)
-			BUG("'size' is supposed to be the object size!");
-	}
-}
-
-static inline unsigned long oe_delta_size(struct packing_data *pack,
-					  const struct object_entry *e)
-{
-	if (e->delta_size_valid)
-		return e->delta_size_;
-
-	/*
-	 * pack->delta_size[] can't be NULL because oe_set_delta_size()
-	 * must have been called when a new delta is saved with
-	 * oe_set_delta().
-	 * If oe_delta() returns NULL (i.e. default state, which means
-	 * delta_size_valid is also false), then the caller must never
-	 * call oe_delta_size().
-	 */
-	return pack->delta_size[e - pack->objects];
-}
-
-static inline void oe_set_delta_size(struct packing_data *pack,
-				     struct object_entry *e,
-				     unsigned long size)
-{
-	if (size < pack->oe_delta_size_limit) {
-		e->delta_size_ = size;
-		e->delta_size_valid = 1;
-	} else {
-		packing_data_lock(pack);
-		if (!pack->delta_size)
-			ALLOC_ARRAY(pack->delta_size, pack->nr_alloc);
-		packing_data_unlock(pack);
-
-		pack->delta_size[e - pack->objects] = size;
-		e->delta_size_valid = 0;
-	}
-}
+		      const struct object_id *oid);
 
 static inline unsigned int oe_tree_depth(struct packing_data *pack,
 					 struct object_entry *e)
@@ -413,23 +278,6 @@ static inline unsigned int oe_tree_depth(struct packing_data *pack,
 	if (!pack->tree_depth)
 		return 0;
 	return pack->tree_depth[e - pack->objects];
-}
-
-static inline void oe_set_tree_depth(struct packing_data *pack,
-				     struct object_entry *e,
-				     unsigned int tree_depth)
-{
-	if (!pack->tree_depth)
-		CALLOC_ARRAY(pack->tree_depth, pack->nr_alloc);
-	pack->tree_depth[e - pack->objects] = tree_depth;
-}
-
-static inline unsigned char oe_layer(struct packing_data *pack,
-				     struct object_entry *e)
-{
-	if (!pack->layer)
-		return 0;
-	return pack->layer[e - pack->objects];
 }
 
 static inline void oe_set_layer(struct packing_data *pack,

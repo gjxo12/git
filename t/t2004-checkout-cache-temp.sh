@@ -8,6 +8,7 @@ test_description='git checkout-index --temp test.
 With --temp flag, git checkout-index writes to temporary merge files
 rather than the tracked path.'
 
+TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -88,9 +89,17 @@ test_expect_success 'checkout all stage 2 to temporary files' '
 	done
 '
 
+test_expect_success 'checkout all stages of unknown path' '
+	rm -f path* .merge_* actual &&
+	test_must_fail git checkout-index --stage=all --temp \
+		-- does-not-exist 2>stderr &&
+	test_i18ngrep not.in.the.cache stderr
+'
+
 test_expect_success 'checkout all stages/one file to nothing' '
 	rm -f path* .merge_* actual &&
-	git checkout-index --stage=all --temp -- path0 >actual &&
+	git checkout-index --stage=all --temp -- path0 >actual 2>stderr &&
+	test_must_be_empty stderr &&
 	test_line_count = 0 actual
 '
 

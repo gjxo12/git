@@ -32,6 +32,20 @@ struct ll_merge_driver {
 	char *cmdline;
 };
 
+static struct attr_check *merge_attributes;
+static struct attr_check *load_merge_attributes(void)
+{
+	if (!merge_attributes)
+		merge_attributes = attr_check_initl("merge", "conflict-marker-size", NULL);
+	return merge_attributes;
+}
+
+void reset_merge_attributes(void)
+{
+	attr_check_free(merge_attributes);
+	merge_attributes = NULL;
+}
+
 /*
  * Built-in low-levels
  */
@@ -77,7 +91,9 @@ static int ll_binary_merge(const struct ll_merge_driver *drv_unused,
 	 * With -Xtheirs or -Xours, we have cleanly merged;
 	 * otherwise we got a conflict.
 	 */
-	return (opts->variant ? 0 : 1);
+	return opts->variant == XDL_MERGE_FAVOR_OURS ||
+	       opts->variant == XDL_MERGE_FAVOR_THEIRS ?
+	       0 : 1;
 }
 
 static int ll_xdl_merge(const struct ll_merge_driver *drv_unused,
@@ -122,7 +138,7 @@ static int ll_xdl_merge(const struct ll_merge_driver *drv_unused,
 
 static int ll_union_merge(const struct ll_merge_driver *drv_unused,
 			  mmbuffer_t *result,
-			  const char *path_unused,
+			  const char *path,
 			  mmfile_t *orig, const char *orig_name,
 			  mmfile_t *src1, const char *name1,
 			  mmfile_t *src2, const char *name2,
@@ -134,8 +150,8 @@ static int ll_union_merge(const struct ll_merge_driver *drv_unused,
 	assert(opts);
 	o = *opts;
 	o.variant = XDL_MERGE_FAVOR_UNION;
-	return ll_xdl_merge(drv_unused, result, path_unused,
-			    orig, NULL, src1, NULL, src2, NULL,
+	return ll_xdl_merge(drv_unused, result, path,
+			    orig, orig_name, src1, name1, src2, name2,
 			    &o, marker_size);
 }
 
@@ -233,7 +249,7 @@ static int read_merge_config(const char *var, const char *value, void *cb)
 {
 	struct ll_merge_driver *fn;
 	const char *key, *name;
-	int namelen;
+	size_t namelen;
 
 	if (!strcmp(var, "merge.default"))
 		return git_config_string(&default_ll_merge, var, value);
@@ -254,7 +270,7 @@ static int read_merge_config(const char *var, const char *value, void *cb)
 		if (!strncmp(fn->name, name, namelen) && !fn->name[namelen])
 			break;
 	if (!fn) {
-		fn = xcalloc(1, sizeof(struct ll_merge_driver));
+		CALLOC_ARRAY(fn, 1);
 		fn->name = xmemdupz(name, namelen);
 		fn->fn = ll_ext_merge;
 		*ll_user_merge_tail = fn;
@@ -354,7 +370,7 @@ int ll_merge(mmbuffer_t *result_buf,
 	     struct index_state *istate,
 	     const struct ll_merge_options *opts)
 {
-	static struct attr_check *check;
+	struct attr_check *check = load_merge_attributes();
 	static const struct ll_merge_options default_opts;
 	const char *ll_driver_name = NULL;
 	int marker_size = DEFAULT_CONFLICT_MARKER_SIZE;
@@ -368,9 +384,6 @@ int ll_merge(mmbuffer_t *result_buf,
 		normalize_file(ours, path, istate);
 		normalize_file(theirs, path, istate);
 	}
-
-	if (!check)
-		check = attr_check_initl("merge", "conflict-marker-size", NULL);
 
 	git_check_attr(istate, path, check);
 	ll_driver_name = check->items[0].value;

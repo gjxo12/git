@@ -1,3 +1,4 @@
+#define USE_THE_INDEX_COMPATIBILITY_MACROS
 #include "builtin.h"
 #include "tree-walk.h"
 #include "xdiff-interface.h"
@@ -76,7 +77,8 @@ static void *result(struct merge_list *entry, unsigned long *size)
 	their = NULL;
 	if (entry)
 		their = entry->blob;
-	return merge_blobs(&the_index, path, base, our, their, size);
+	return merge_blobs(the_repository->index, path,
+			   base, our, their, size);
 }
 
 static void *origin(struct merge_list *entry, unsigned long *size)
@@ -105,14 +107,12 @@ static void show_diff(struct merge_list *entry)
 	mmfile_t src, dst;
 	xpparam_t xpp;
 	xdemitconf_t xecfg;
-	xdemitcb_t ecb;
+	xdemitcb_t ecb = { .out_line = show_outf };
 
+	memset(&xpp, 0, sizeof(xpp));
 	xpp.flags = 0;
 	memset(&xecfg, 0, sizeof(xecfg));
 	xecfg.ctxlen = 3;
-	ecb.out_hunk = NULL;
-	ecb.out_line = show_outf;
-	ecb.priv = NULL;
 
 	src.ptr = origin(entry, &size);
 	if (!src.ptr)
@@ -178,8 +178,9 @@ static struct merge_list *create_entry(unsigned stage, unsigned mode, const stru
 
 static char *traverse_path(const struct traverse_info *info, const struct name_entry *n)
 {
-	char *path = xmallocz(traverse_path_len(info, n) + the_hash_algo->rawsz);
-	return make_traverse_path(path, info, n);
+	struct strbuf buf = STRBUF_INIT;
+	strbuf_make_traverse_path(&buf, info, n->path, n->pathlen);
+	return strbuf_detach(&buf, NULL);
 }
 
 static void resolve(const struct traverse_info *info, struct name_entry *ours, struct name_entry *result)
@@ -203,6 +204,7 @@ static void resolve(const struct traverse_info *info, struct name_entry *ours, s
 static void unresolved_directory(const struct traverse_info *info,
 				 struct name_entry n[3])
 {
+	struct repository *r = the_repository;
 	char *newbase;
 	struct name_entry *p;
 	struct tree_desc t[3];
@@ -218,9 +220,9 @@ static void unresolved_directory(const struct traverse_info *info,
 	newbase = traverse_path(info, p);
 
 #define ENTRY_OID(e) (((e)->mode && S_ISDIR((e)->mode)) ? &(e)->oid : NULL)
-	buf0 = fill_tree_descriptor(t + 0, ENTRY_OID(n + 0));
-	buf1 = fill_tree_descriptor(t + 1, ENTRY_OID(n + 1));
-	buf2 = fill_tree_descriptor(t + 2, ENTRY_OID(n + 2));
+	buf0 = fill_tree_descriptor(r, t + 0, ENTRY_OID(n + 0));
+	buf1 = fill_tree_descriptor(r, t + 1, ENTRY_OID(n + 1));
+	buf2 = fill_tree_descriptor(r, t + 2, ENTRY_OID(n + 2));
 #undef ENTRY_OID
 
 	merge_trees(t, newbase);
@@ -349,14 +351,16 @@ static void merge_trees(struct tree_desc t[3], const char *base)
 	traverse_trees(&the_index, 3, t, &info);
 }
 
-static void *get_tree_descriptor(struct tree_desc *desc, const char *rev)
+static void *get_tree_descriptor(struct repository *r,
+				 struct tree_desc *desc,
+				 const char *rev)
 {
 	struct object_id oid;
 	void *buf;
 
-	if (get_oid(rev, &oid))
+	if (repo_get_oid(r, rev, &oid))
 		die("unknown rev %s", rev);
-	buf = fill_tree_descriptor(desc, &oid);
+	buf = fill_tree_descriptor(r, desc, &oid);
 	if (!buf)
 		die("%s is not a tree", rev);
 	return buf;
@@ -364,15 +368,16 @@ static void *get_tree_descriptor(struct tree_desc *desc, const char *rev)
 
 int cmd_merge_tree(int argc, const char **argv, const char *prefix)
 {
+	struct repository *r = the_repository;
 	struct tree_desc t[3];
 	void *buf1, *buf2, *buf3;
 
 	if (argc != 4)
 		usage(merge_tree_usage);
 
-	buf1 = get_tree_descriptor(t+0, argv[1]);
-	buf2 = get_tree_descriptor(t+1, argv[2]);
-	buf3 = get_tree_descriptor(t+2, argv[3]);
+	buf1 = get_tree_descriptor(r, t+0, argv[1]);
+	buf2 = get_tree_descriptor(r, t+1, argv[2]);
+	buf3 = get_tree_descriptor(r, t+2, argv[3]);
 	merge_trees(t, "");
 	free(buf1);
 	free(buf2);

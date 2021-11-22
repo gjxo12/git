@@ -26,7 +26,8 @@
 #include "progress.h"
 #include "object-store.h"
 #include "blame.h"
-#include "string-list.h"
+#include "refs.h"
+#include "tag.h"
 
 static char blame_usage[] = N_("git blame [<options>] [<rev-opts>] [<rev>] [--] <file>");
 
@@ -52,14 +53,17 @@ static int no_whole_file_rename;
 static int show_progress;
 static char repeated_meta_color[COLOR_MAXLEN];
 static int coloring_mode;
+static struct string_list ignore_revs_file_list = STRING_LIST_INIT_NODUP;
+static int mark_unblamable_lines;
+static int mark_ignored_lines;
 
 static struct date_mode blame_date_mode = { DATE_ISO8601 };
 static size_t blame_date_width;
 
 static struct string_list mailmap = STRING_LIST_INIT_NODUP;
 
-#ifndef DEBUG
-#define DEBUG 0
+#ifndef DEBUG_BLAME
+#define DEBUG_BLAME 0
 #endif
 
 static unsigned blame_move_score;
@@ -96,6 +100,16 @@ struct commit_info {
 
 	struct strbuf summary;
 };
+
+#define COMMIT_INFO_INIT { \
+	.author = STRBUF_INIT, \
+	.author_mail = STRBUF_INIT, \
+	.author_tz = STRBUF_INIT, \
+	.committer = STRBUF_INIT, \
+	.committer_mail = STRBUF_INIT, \
+	.committer_tz = STRBUF_INIT, \
+	.summary = STRBUF_INIT, \
+}
 
 /*
  * Parse author/committer line in the commit object buffer
@@ -156,18 +170,6 @@ static void get_ac_line(const char *inbuf, const char *what,
 	strbuf_add(name, namebuf, namelen);
 }
 
-static void commit_info_init(struct commit_info *ci)
-{
-
-	strbuf_init(&ci->author, 0);
-	strbuf_init(&ci->author_mail, 0);
-	strbuf_init(&ci->author_tz, 0);
-	strbuf_init(&ci->committer, 0);
-	strbuf_init(&ci->committer_mail, 0);
-	strbuf_init(&ci->committer_tz, 0);
-	strbuf_init(&ci->summary, 0);
-}
-
 static void commit_info_destroy(struct commit_info *ci)
 {
 
@@ -187,8 +189,6 @@ static void get_commit_info(struct commit *commit,
 	int len;
 	const char *subject, *encoding;
 	const char *message;
-
-	commit_info_init(ret);
 
 	encoding = get_log_output_encoding();
 	message = logmsg_reencode(commit, NULL, encoding);
@@ -242,7 +242,7 @@ static void write_filename_info(struct blame_origin *suspect)
  */
 static int emit_one_suspect_detail(struct blame_origin *suspect, int repeat)
 {
-	struct commit_info ci;
+	struct commit_info ci = COMMIT_INFO_INIT;
 
 	if (!repeat && (suspect->commit->object.flags & METAINFO_SHOWN))
 		return 0;
@@ -316,18 +316,18 @@ static const char *format_time(timestamp_t time, const char *tz_str,
 	return time_buf.buf;
 }
 
-#define OUTPUT_ANNOTATE_COMPAT	001
-#define OUTPUT_LONG_OBJECT_NAME	002
-#define OUTPUT_RAW_TIMESTAMP	004
-#define OUTPUT_PORCELAIN	010
-#define OUTPUT_SHOW_NAME	020
-#define OUTPUT_SHOW_NUMBER	040
-#define OUTPUT_SHOW_SCORE	0100
-#define OUTPUT_NO_AUTHOR	0200
-#define OUTPUT_SHOW_EMAIL	0400
-#define OUTPUT_LINE_PORCELAIN	01000
-#define OUTPUT_COLOR_LINE	02000
-#define OUTPUT_SHOW_AGE_WITH_COLOR	04000
+#define OUTPUT_ANNOTATE_COMPAT      (1U<<0)
+#define OUTPUT_LONG_OBJECT_NAME     (1U<<1)
+#define OUTPUT_RAW_TIMESTAMP        (1U<<2)
+#define OUTPUT_PORCELAIN            (1U<<3)
+#define OUTPUT_SHOW_NAME            (1U<<4)
+#define OUTPUT_SHOW_NUMBER          (1U<<5)
+#define OUTPUT_SHOW_SCORE           (1U<<6)
+#define OUTPUT_NO_AUTHOR            (1U<<7)
+#define OUTPUT_SHOW_EMAIL           (1U<<8)
+#define OUTPUT_LINE_PORCELAIN       (1U<<9)
+#define OUTPUT_COLOR_LINE           (1U<<10)
+#define OUTPUT_SHOW_AGE_WITH_COLOR  (1U<<11)
 
 static void emit_porcelain_details(struct blame_origin *suspect, int repeat)
 {
@@ -421,13 +421,11 @@ static void setup_default_color_by_age(void)
 	parse_color_fields("blue,12 month ago,white,1 month ago,red");
 }
 
-static void determine_line_heat(struct blame_entry *ent, const char **dest_color)
+static void determine_line_heat(struct commit_info *ci, const char **dest_color)
 {
 	int i = 0;
-	struct commit_info ci;
-	get_commit_info(ent->suspect->commit, &ci, 1);
 
-	while (i < colorfield_nr && ci.author_time > colorfield[i].hop)
+	while (i < colorfield_nr && ci->author_time > colorfield[i].hop)
 		i++;
 
 	*dest_color = colorfield[i].col;
@@ -438,7 +436,7 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 	int cnt;
 	const char *cp;
 	struct blame_origin *suspect = ent->suspect;
-	struct commit_info ci;
+	struct commit_info ci = COMMIT_INFO_INIT;
 	char hex[GIT_MAX_HEXSZ + 1];
 	int show_raw_time = !!(opt & OUTPUT_RAW_TIMESTAMP);
 	const char *default_color = NULL, *color = NULL, *reset = NULL;
@@ -449,14 +447,14 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 	cp = blame_nth_line(sb, ent->lno);
 
 	if (opt & OUTPUT_SHOW_AGE_WITH_COLOR) {
-		determine_line_heat(ent, &default_color);
+		determine_line_heat(&ci, &default_color);
 		color = default_color;
 		reset = GIT_COLOR_RESET;
 	}
 
 	for (cnt = 0; cnt < ent->num_lines; cnt++) {
 		char ch;
-		int length = (opt & OUTPUT_LONG_OBJECT_NAME) ? GIT_SHA1_HEXSZ : abbrev;
+		int length = (opt & OUTPUT_LONG_OBJECT_NAME) ? the_hash_algo->hexsz : abbrev;
 
 		if (opt & OUTPUT_COLOR_LINE) {
 			if (cnt > 0) {
@@ -479,6 +477,14 @@ static void emit_other(struct blame_scoreboard *sb, struct blame_entry *ent, int
 			}
 		}
 
+		if (mark_unblamable_lines && ent->unblamable) {
+			length--;
+			putchar('*');
+		}
+		if (mark_ignored_lines && ent->ignored) {
+			length--;
+			putchar('?');
+		}
 		printf("%.*s", length, hex);
 		if (opt & OUTPUT_ANNOTATE_COMPAT) {
 			const char *name;
@@ -620,7 +626,7 @@ static void find_alignment(struct blame_scoreboard *sb, int *option)
 		if (longest_file < num)
 			longest_file = num;
 		if (!(suspect->commit->object.flags & METAINFO_SHOWN)) {
-			struct commit_info ci;
+			struct commit_info ci = COMMIT_INFO_INIT;
 			suspect->commit->object.flags |= METAINFO_SHOWN;
 			get_commit_info(suspect->commit, &ci, 1);
 			if (*option & OUTPUT_SHOW_EMAIL)
@@ -693,6 +699,24 @@ static int git_blame_config(const char *var, const char *value, void *cb)
 		if (!value)
 			return config_error_nonbool(var);
 		parse_date_format(value, &blame_date_mode);
+		return 0;
+	}
+	if (!strcmp(var, "blame.ignorerevsfile")) {
+		const char *str;
+		int ret;
+
+		ret = git_config_pathname(&str, var, value);
+		if (ret)
+			return ret;
+		string_list_insert(&ignore_revs_file_list, str);
+		return 0;
+	}
+	if (!strcmp(var, "blame.markunblamablelines")) {
+		mark_unblamable_lines = git_config_bool(var, value);
+		return 0;
+	}
+	if (!strcmp(var, "blame.markignoredlines")) {
+		mark_ignored_lines = git_config_bool(var, value);
 		return 0;
 	}
 	if (!strcmp(var, "color.blame.repeatedlines")) {
@@ -774,6 +798,51 @@ static int is_a_rev(const char *name)
 	return OBJ_NONE < oid_object_info(the_repository, &oid, NULL);
 }
 
+static int peel_to_commit_oid(struct object_id *oid_ret, void *cbdata)
+{
+	struct repository *r = ((struct blame_scoreboard *)cbdata)->repo;
+	struct object_id oid;
+
+	oidcpy(&oid, oid_ret);
+	while (1) {
+		struct object *obj;
+		int kind = oid_object_info(r, &oid, NULL);
+		if (kind == OBJ_COMMIT) {
+			oidcpy(oid_ret, &oid);
+			return 0;
+		}
+		if (kind != OBJ_TAG)
+			return -1;
+		obj = deref_tag(r, parse_object(r, &oid), NULL, 0);
+		if (!obj)
+			return -1;
+		oidcpy(&oid, &obj->oid);
+	}
+}
+
+static void build_ignorelist(struct blame_scoreboard *sb,
+			     struct string_list *ignore_revs_file_list,
+			     struct string_list *ignore_rev_list)
+{
+	struct string_list_item *i;
+	struct object_id oid;
+
+	oidset_init(&sb->ignore_list, 0);
+	for_each_string_list_item(i, ignore_revs_file_list) {
+		if (!strcmp(i->string, ""))
+			oidset_clear(&sb->ignore_list);
+		else
+			oidset_parse_file_carefully(&sb->ignore_list, i->string,
+						    peel_to_commit_oid, sb);
+	}
+	for_each_string_list_item(i, ignore_rev_list) {
+		if (get_oid_committish(i->string, &oid) ||
+		    peel_to_commit_oid(&oid, sb))
+			die(_("cannot find revision %s to ignore"), i->string);
+		oidset_insert(&sb->ignore_list, &oid);
+	}
+}
+
 int cmd_blame(int argc, const char **argv, const char *prefix)
 {
 	struct rev_info revs;
@@ -785,43 +854,39 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 	struct progress_info pi = { NULL, 0 };
 
 	struct string_list range_list = STRING_LIST_INIT_NODUP;
+	struct string_list ignore_rev_list = STRING_LIST_INIT_NODUP;
 	int output_option = 0, opt = 0;
 	int show_stats = 0;
 	const char *revs_file = NULL;
 	const char *contents_from = NULL;
 	const struct option options[] = {
-		OPT_BOOL(0, "incremental", &incremental, N_("Show blame entries as we find them, incrementally")),
-		OPT_BOOL('b', NULL, &blank_boundary, N_("Show blank SHA-1 for boundary commits (Default: off)")),
-		OPT_BOOL(0, "root", &show_root, N_("Do not treat root commits as boundaries (Default: off)")),
-		OPT_BOOL(0, "show-stats", &show_stats, N_("Show work cost statistics")),
-		OPT_BOOL(0, "progress", &show_progress, N_("Force progress reporting")),
-		OPT_BIT(0, "score-debug", &output_option, N_("Show output score for blame entries"), OUTPUT_SHOW_SCORE),
-		OPT_BIT('f', "show-name", &output_option, N_("Show original filename (Default: auto)"), OUTPUT_SHOW_NAME),
-		OPT_BIT('n', "show-number", &output_option, N_("Show original linenumber (Default: off)"), OUTPUT_SHOW_NUMBER),
-		OPT_BIT('p', "porcelain", &output_option, N_("Show in a format designed for machine consumption"), OUTPUT_PORCELAIN),
-		OPT_BIT(0, "line-porcelain", &output_option, N_("Show porcelain format with per-line commit information"), OUTPUT_PORCELAIN|OUTPUT_LINE_PORCELAIN),
-		OPT_BIT('c', NULL, &output_option, N_("Use the same output mode as git-annotate (Default: off)"), OUTPUT_ANNOTATE_COMPAT),
-		OPT_BIT('t', NULL, &output_option, N_("Show raw timestamp (Default: off)"), OUTPUT_RAW_TIMESTAMP),
-		OPT_BIT('l', NULL, &output_option, N_("Show long commit SHA1 (Default: off)"), OUTPUT_LONG_OBJECT_NAME),
-		OPT_BIT('s', NULL, &output_option, N_("Suppress author name and timestamp (Default: off)"), OUTPUT_NO_AUTHOR),
-		OPT_BIT('e', "show-email", &output_option, N_("Show author email instead of name (Default: off)"), OUTPUT_SHOW_EMAIL),
-		OPT_BIT('w', NULL, &xdl_opts, N_("Ignore whitespace differences"), XDF_IGNORE_WHITESPACE),
+		OPT_BOOL(0, "incremental", &incremental, N_("show blame entries as we find them, incrementally")),
+		OPT_BOOL('b', NULL, &blank_boundary, N_("do not show object names of boundary commits (Default: off)")),
+		OPT_BOOL(0, "root", &show_root, N_("do not treat root commits as boundaries (Default: off)")),
+		OPT_BOOL(0, "show-stats", &show_stats, N_("show work cost statistics")),
+		OPT_BOOL(0, "progress", &show_progress, N_("force progress reporting")),
+		OPT_BIT(0, "score-debug", &output_option, N_("show output score for blame entries"), OUTPUT_SHOW_SCORE),
+		OPT_BIT('f', "show-name", &output_option, N_("show original filename (Default: auto)"), OUTPUT_SHOW_NAME),
+		OPT_BIT('n', "show-number", &output_option, N_("show original linenumber (Default: off)"), OUTPUT_SHOW_NUMBER),
+		OPT_BIT('p', "porcelain", &output_option, N_("show in a format designed for machine consumption"), OUTPUT_PORCELAIN),
+		OPT_BIT(0, "line-porcelain", &output_option, N_("show porcelain format with per-line commit information"), OUTPUT_PORCELAIN|OUTPUT_LINE_PORCELAIN),
+		OPT_BIT('c', NULL, &output_option, N_("use the same output mode as git-annotate (Default: off)"), OUTPUT_ANNOTATE_COMPAT),
+		OPT_BIT('t', NULL, &output_option, N_("show raw timestamp (Default: off)"), OUTPUT_RAW_TIMESTAMP),
+		OPT_BIT('l', NULL, &output_option, N_("show long commit SHA1 (Default: off)"), OUTPUT_LONG_OBJECT_NAME),
+		OPT_BIT('s', NULL, &output_option, N_("suppress author name and timestamp (Default: off)"), OUTPUT_NO_AUTHOR),
+		OPT_BIT('e', "show-email", &output_option, N_("show author email instead of name (Default: off)"), OUTPUT_SHOW_EMAIL),
+		OPT_BIT('w', NULL, &xdl_opts, N_("ignore whitespace differences"), XDF_IGNORE_WHITESPACE),
+		OPT_STRING_LIST(0, "ignore-rev", &ignore_rev_list, N_("rev"), N_("ignore <rev> when blaming")),
+		OPT_STRING_LIST(0, "ignore-revs-file", &ignore_revs_file_list, N_("file"), N_("ignore revisions from <file>")),
 		OPT_BIT(0, "color-lines", &output_option, N_("color redundant metadata from previous line differently"), OUTPUT_COLOR_LINE),
 		OPT_BIT(0, "color-by-age", &output_option, N_("color lines by age"), OUTPUT_SHOW_AGE_WITH_COLOR),
-
-		/*
-		 * The following two options are parsed by parse_revision_opt()
-		 * and are only included here to get included in the "-h"
-		 * output:
-		 */
-		{ OPTION_LOWLEVEL_CALLBACK, 0, "indent-heuristic", NULL, NULL, N_("Use an experimental heuristic to improve diffs"), PARSE_OPT_NOARG, parse_opt_unknown_cb },
-
-		OPT_BIT(0, "minimal", &xdl_opts, N_("Spend extra cycles to find better match"), XDF_NEED_MINIMAL),
-		OPT_STRING('S', NULL, &revs_file, N_("file"), N_("Use revisions from <file> instead of calling git-rev-list")),
-		OPT_STRING(0, "contents", &contents_from, N_("file"), N_("Use <file>'s contents as the final image")),
-		{ OPTION_CALLBACK, 'C', NULL, &opt, N_("score"), N_("Find line copies within and across files"), PARSE_OPT_OPTARG, blame_copy_callback },
-		{ OPTION_CALLBACK, 'M', NULL, &opt, N_("score"), N_("Find line movements within and across files"), PARSE_OPT_OPTARG, blame_move_callback },
-		OPT_STRING_LIST('L', NULL, &range_list, N_("n,m"), N_("Process only line range n,m, counting from 1")),
+		OPT_BIT(0, "minimal", &xdl_opts, N_("spend extra cycles to find better match"), XDF_NEED_MINIMAL),
+		OPT_STRING('S', NULL, &revs_file, N_("file"), N_("use revisions from <file> instead of calling git-rev-list")),
+		OPT_STRING(0, "contents", &contents_from, N_("file"), N_("use <file>'s contents as the final image")),
+		OPT_CALLBACK_F('C', NULL, &opt, N_("score"), N_("find line copies within and across files"), PARSE_OPT_OPTARG, blame_copy_callback),
+		OPT_CALLBACK_F('M', NULL, &opt, N_("score"), N_("find line movements within and across files"), PARSE_OPT_OPTARG, blame_move_callback),
+		OPT_STRING_LIST('L', NULL, &range_list, N_("range"),
+				N_("process only line range <start>,<end> or function :<funcname>")),
 		OPT__ABBREV(&abbrev),
 		OPT_END()
 	};
@@ -831,6 +896,7 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 	struct range_set ranges;
 	unsigned int range_i;
 	long anchor;
+	const int hexsz = the_hash_algo->hexsz;
 
 	setup_default_color_by_age();
 	git_config(git_blame_config, &output_option);
@@ -847,6 +913,9 @@ int cmd_blame(int argc, const char **argv, const char *prefix)
 			    PARSE_OPT_KEEP_DASHDASH | PARSE_OPT_KEEP_ARGV0);
 	for (;;) {
 		switch (parse_options_step(&ctx, options, blame_opt_usage)) {
+		case PARSE_OPT_NON_OPTION:
+		case PARSE_OPT_UNKNOWN:
+			break;
 		case PARSE_OPT_HELP:
 		case PARSE_OPT_ERROR:
 			exit(129);
@@ -877,11 +946,11 @@ parse_done:
 	} else if (show_progress < 0)
 		show_progress = isatty(2);
 
-	if (0 < abbrev && abbrev < GIT_SHA1_HEXSZ)
+	if (0 < abbrev && abbrev < hexsz)
 		/* one more abbrev length is needed for the boundary commit */
 		abbrev++;
 	else if (!abbrev)
-		abbrev = GIT_SHA1_HEXSZ;
+		abbrev = hexsz;
 
 	if (revs_file && read_ancestry(revs_file))
 		die_errno("reading graft file '%s' failed", revs_file);
@@ -924,6 +993,10 @@ parse_done:
 		 * columns.
 		 */
 		blame_date_width = utf8_strwidth(_("4 years, 11 months ago")) + 1; /* add the null */
+		break;
+	case DATE_HUMAN:
+		/* If the year is shown, no time is shown */
+		blame_date_width = sizeof("Thu Oct 19 16:00");
 		break;
 	case DATE_NORMAL:
 		blame_date_width = sizeof("Thu Oct 19 16:00:04 2006 -0700");
@@ -989,13 +1062,37 @@ parse_done:
 
 	revs.disable_stdin = 1;
 	setup_revisions(argc, argv, &revs, NULL);
+	if (!revs.pending.nr && is_bare_repository()) {
+		struct commit *head_commit;
+		struct object_id head_oid;
+
+		if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING,
+					&head_oid, NULL) ||
+		    !(head_commit = lookup_commit_reference_gently(revs.repo,
+							     &head_oid, 1)))
+			die("no such ref: HEAD");
+
+		add_pending_object(&revs, &head_commit->object, "HEAD");
+	}
 
 	init_scoreboard(&sb);
 	sb.revs = &revs;
 	sb.contents_from = contents_from;
 	sb.reverse = reverse;
 	sb.repo = the_repository;
-	setup_scoreboard(&sb, path, &o);
+	sb.path = path;
+	build_ignorelist(&sb, &ignore_revs_file_list, &ignore_rev_list);
+	string_list_clear(&ignore_revs_file_list, 0);
+	string_list_clear(&ignore_rev_list, 0);
+	setup_scoreboard(&sb, &o);
+
+	/*
+	 * Changed-path Bloom filters are disabled when looking
+	 * for copies.
+	 */
+	if (!(opt & PICKAXE_BLAME_COPY))
+		setup_blame_bloom_data(&sb);
+
 	lno = sb.num_lines;
 
 	if (lno && !range_list.nr)
@@ -1007,12 +1104,13 @@ parse_done:
 		long bottom, top;
 		if (parse_range_arg(range_list.items[range_i].string,
 				    nth_line_cb, &sb, lno, anchor,
-				    &bottom, &top, sb.path, &the_index))
+				    &bottom, &top, sb.path,
+				    the_repository->index))
 			usage(blame_usage);
 		if ((!lno && (top || bottom)) || lno < bottom)
 			die(Q_("file %s has only %lu line",
 			       "file %s has only %lu lines",
-			       lno), path, lno);
+			       lno), sb.path, lno);
 		if (bottom < 1)
 			bottom = 1;
 		if (top < 1 || lno < top)
@@ -1037,21 +1135,20 @@ parse_done:
 	string_list_clear(&range_list, 0);
 
 	sb.ent = NULL;
-	sb.path = path;
 
 	if (blame_move_score)
 		sb.move_score = blame_move_score;
 	if (blame_copy_score)
 		sb.copy_score = blame_copy_score;
 
-	sb.debug = DEBUG;
+	sb.debug = DEBUG_BLAME;
 	sb.on_sanity_fail = &sanity_check_on_fail;
 
 	sb.show_root = show_root;
 	sb.xdl_opts = xdl_opts;
 	sb.no_whole_file_rename = no_whole_file_rename;
 
-	read_mailmap(&mailmap, NULL);
+	read_mailmap(&mailmap);
 
 	sb.found_guilty_entry = &found_guilty_entry;
 	sb.found_guilty_entry_data = &pi;
@@ -1098,5 +1195,7 @@ parse_done:
 		printf("num get patch: %d\n", sb.num_get_patch);
 		printf("num commits: %d\n", sb.num_commits);
 	}
+
+	cleanup_scoreboard(&sb);
 	return 0;
 }

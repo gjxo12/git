@@ -1,6 +1,9 @@
 #!/bin/sh
 
 test_description='signed tag tests'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-gpg.sh"
 
@@ -17,7 +20,7 @@ test_expect_success GPG 'create signed tags' '
 	echo 3 >elif && git add elif &&
 	test_tick && git commit -m "third on side" &&
 
-	git checkout master &&
+	git checkout main &&
 	test_tick && git merge -S side &&
 	git tag -s -m merge merge &&
 
@@ -44,8 +47,8 @@ test_expect_success GPG 'create signed tags' '
 test_expect_success GPGSM 'create signed tags x509 ' '
 	test_config gpg.format x509 &&
 	test_config user.signingkey $GIT_COMMITTER_EMAIL &&
-	echo 9 >file && test_tick && git commit -a -m "nineth gpgsm-signed" &&
-	git tag -s -m nineth nineth-signed-x509
+	echo 9 >file && test_tick && git commit -a -m "ninth gpgsm-signed" &&
+	git tag -s -m ninth ninth-signed-x509
 '
 
 test_expect_success GPG 'verify and show signatures' '
@@ -80,10 +83,34 @@ test_expect_success GPG 'verify and show signatures' '
 '
 
 test_expect_success GPGSM 'verify and show signatures x509' '
-	git verify-tag nineth-signed-x509 2>actual &&
+	git verify-tag ninth-signed-x509 2>actual &&
 	grep "Good signature from" actual &&
 	! grep "BAD signature from" actual &&
-	echo nineth-signed-x509 OK
+	echo ninth-signed-x509 OK
+'
+
+test_expect_success GPGSM 'verify and show signatures x509 with low minTrustLevel' '
+	test_config gpg.minTrustLevel undefined &&
+	git verify-tag ninth-signed-x509 2>actual &&
+	grep "Good signature from" actual &&
+	! grep "BAD signature from" actual &&
+	echo ninth-signed-x509 OK
+'
+
+test_expect_success GPGSM 'verify and show signatures x509 with matching minTrustLevel' '
+	test_config gpg.minTrustLevel fully &&
+	git verify-tag ninth-signed-x509 2>actual &&
+	grep "Good signature from" actual &&
+	! grep "BAD signature from" actual &&
+	echo ninth-signed-x509 OK
+'
+
+test_expect_success GPGSM 'verify and show signatures x509 with high minTrustLevel' '
+	test_config gpg.minTrustLevel ultimate &&
+	test_must_fail git verify-tag ninth-signed-x509 2>actual &&
+	grep "Good signature from" actual &&
+	! grep "BAD signature from" actual &&
+	echo ninth-signed-x509 OK
 '
 
 test_expect_success GPG 'detect fudged signature' '
@@ -127,10 +154,10 @@ test_expect_success GPG 'verify signatures with --raw' '
 '
 
 test_expect_success GPGSM 'verify signatures with --raw x509' '
-	git verify-tag --raw nineth-signed-x509 2>actual &&
+	git verify-tag --raw ninth-signed-x509 2>actual &&
 	grep "GOODSIG" actual &&
 	! grep "BADSIG" actual &&
-	echo nineth-signed-x509 OK
+	echo ninth-signed-x509 OK
 '
 
 test_expect_success GPG 'verify multiple tags' '
@@ -147,7 +174,7 @@ test_expect_success GPG 'verify multiple tags' '
 '
 
 test_expect_success GPGSM 'verify multiple tags x509' '
-	tags="seventh-signed nineth-signed-x509" &&
+	tags="seventh-signed ninth-signed-x509" &&
 	for i in $tags
 	do
 		git verify-tag -v --raw $i || return 1
@@ -165,6 +192,10 @@ test_expect_success GPG 'verifying tag with --format' '
 	EOF
 	git verify-tag --format="tagname : %(tag)" "fourth-signed" >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success GPG 'verifying tag with --format="%(rest)" must fail' '
+	test_must_fail git verify-tag --format="%(rest)" "fourth-signed"
 '
 
 test_expect_success GPG 'verifying a forged tag with --format should fail silently' '

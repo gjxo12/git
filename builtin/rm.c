@@ -3,7 +3,9 @@
  *
  * Copyright (C) Linus Torvalds 2006
  */
+#define USE_THE_INDEX_COMPATIBILITY_MACROS
 #include "builtin.h"
+#include "advice.h"
 #include "config.h"
 #include "lockfile.h"
 #include "dir.h"
@@ -53,14 +55,14 @@ static void print_error_files(struct string_list *files_list,
 			strbuf_addf(&err_msg,
 				    "\n    %s",
 				    files_list->items[i].string);
-		if (advice_rm_hints)
+		if (advice_enabled(ADVICE_RM_HINTS))
 			strbuf_addstr(&err_msg, hints_msg);
 		*errs = error("%s", err_msg.buf);
 		strbuf_release(&err_msg);
 	}
 }
 
-static void submodules_absorb_gitdir_if_needed(const char *prefix)
+static void submodules_absorb_gitdir_if_needed(void)
 {
 	int i;
 	for (i = 0; i < list.nr; i++) {
@@ -82,7 +84,7 @@ static void submodules_absorb_gitdir_if_needed(const char *prefix)
 			continue;
 
 		if (!submodule_uses_gitfile(name))
-			absorb_git_dir_into_superproject(prefix, name,
+			absorb_git_dir_into_superproject(name,
 				ABSORB_GITDIR_RECURSE_SUBMODULES);
 	}
 }
@@ -109,7 +111,7 @@ static int check_local_mod(struct object_id *head, int index_only)
 		const struct cache_entry *ce;
 		const char *name = list.entry[i].name;
 		struct object_id oid;
-		unsigned mode;
+		unsigned short mode;
 		int local_changes = 0;
 		int staged_changes = 0;
 
@@ -178,7 +180,7 @@ static int check_local_mod(struct object_id *head, int index_only)
 		 * way as changed from the HEAD.
 		 */
 		if (no_head
-		     || get_tree_entry(head, name, &oid, &mode)
+		     || get_tree_entry(the_repository, head, name, &oid, &mode)
 		     || ce->ce_mode != create_ce_mode(mode)
 		     || !oideq(&ce->oid, &oid))
 			staged_changes = 1;
@@ -234,7 +236,9 @@ static int check_local_mod(struct object_id *head, int index_only)
 }
 
 static int show_only = 0, force = 0, index_only = 0, recursive = 0, quiet = 0;
-static int ignore_unmatch = 0;
+static int ignore_unmatch = 0, pathspec_file_nul;
+static int include_sparse;
+static char *pathspec_from_file;
 
 static struct option builtin_rm_options[] = {
 	OPT__DRY_RUN(&show_only, N_("dry run")),
@@ -244,13 +248,16 @@ static struct option builtin_rm_options[] = {
 	OPT_BOOL('r', NULL,             &recursive,  N_("allow recursive removal")),
 	OPT_BOOL( 0 , "ignore-unmatch", &ignore_unmatch,
 				N_("exit with a zero status even if nothing matched")),
+	OPT_BOOL(0, "sparse", &include_sparse, N_("allow updating entries outside of the sparse-checkout cone")),
+	OPT_PATHSPEC_FROM_FILE(&pathspec_from_file),
+	OPT_PATHSPEC_FILE_NUL(&pathspec_file_nul),
 	OPT_END(),
 };
 
 int cmd_rm(int argc, const char **argv, const char *prefix)
 {
 	struct lock_file lock_file = LOCK_INIT;
-	int i;
+	int i, ret = 0;
 	struct pathspec pathspec;
 	char *seen;
 
@@ -258,8 +265,24 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 
 	argc = parse_options(argc, argv, prefix, builtin_rm_options,
 			     builtin_rm_usage, 0);
-	if (!argc)
-		usage_with_options(builtin_rm_usage, builtin_rm_options);
+
+	parse_pathspec(&pathspec, 0,
+		       PATHSPEC_PREFER_CWD,
+		       prefix, argv);
+
+	if (pathspec_from_file) {
+		if (pathspec.nr)
+			die(_("--pathspec-from-file is incompatible with pathspec arguments"));
+
+		parse_pathspec_file(&pathspec, 0,
+				    PATHSPEC_PREFER_CWD,
+				    prefix, pathspec_from_file, pathspec_file_nul);
+	} else if (pathspec_file_nul) {
+		die(_("--pathspec-file-nul requires --pathspec-from-file"));
+	}
+
+	if (!pathspec.nr)
+		die(_("No pathspec was given. Which files should I remove?"));
 
 	if (!index_only)
 		setup_work_tree();
@@ -269,15 +292,19 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 	if (read_cache() < 0)
 		die(_("index file corrupt"));
 
-	parse_pathspec(&pathspec, 0,
-		       PATHSPEC_PREFER_CWD,
-		       prefix, argv);
-	refresh_index(&the_index, REFRESH_QUIET, &pathspec, NULL, NULL);
+	refresh_index(&the_index, REFRESH_QUIET|REFRESH_UNMERGED, &pathspec, NULL, NULL);
 
 	seen = xcalloc(pathspec.nr, 1);
 
+	/* TODO: audit for interaction with sparse-index. */
+	ensure_full_index(&the_index);
 	for (i = 0; i < active_nr; i++) {
 		const struct cache_entry *ce = active_cache[i];
+
+		if (!include_sparse &&
+		    (ce_skip_worktree(ce) ||
+		     !path_in_sparse_checkout(ce->name, &the_index)))
+			continue;
 		if (!ce_path_match(&the_index, ce, &pathspec, seen))
 			continue;
 		ALLOC_GROW(list.entry, list.nr + 1, list.alloc);
@@ -291,28 +318,41 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 	if (pathspec.nr) {
 		const char *original;
 		int seen_any = 0;
+		char *skip_worktree_seen = NULL;
+		struct string_list only_match_skip_worktree = STRING_LIST_INIT_NODUP;
+
 		for (i = 0; i < pathspec.nr; i++) {
 			original = pathspec.items[i].original;
-			if (!seen[i]) {
-				if (!ignore_unmatch) {
-					die(_("pathspec '%s' did not match any files"),
-					    original);
-				}
-			}
-			else {
+			if (seen[i])
 				seen_any = 1;
-			}
+			else if (ignore_unmatch)
+				continue;
+			else if (!include_sparse &&
+				 matches_skip_worktree(&pathspec, i, &skip_worktree_seen))
+				string_list_append(&only_match_skip_worktree, original);
+			else
+				die(_("pathspec '%s' did not match any files"), original);
+
 			if (!recursive && seen[i] == MATCHED_RECURSIVELY)
 				die(_("not removing '%s' recursively without -r"),
 				    *original ? original : ".");
 		}
 
+		if (only_match_skip_worktree.nr) {
+			advise_on_updating_sparse_paths(&only_match_skip_worktree);
+			ret = 1;
+		}
+		free(skip_worktree_seen);
+		string_list_clear(&only_match_skip_worktree, 0);
+
 		if (!seen_any)
-			exit(0);
+			exit(ret);
 	}
+	clear_pathspec(&pathspec);
+	free(seen);
 
 	if (!index_only)
-		submodules_absorb_gitdir_if_needed(prefix);
+		submodules_absorb_gitdir_if_needed();
 
 	/*
 	 * If not forced, the file, the index and the HEAD (if exists)
@@ -388,5 +428,5 @@ int cmd_rm(int argc, const char **argv, const char *prefix)
 			       COMMIT_LOCK | SKIP_IF_UNCHANGED))
 		die(_("Unable to write new index file"));
 
-	return 0;
+	return ret;
 }

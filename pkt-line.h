@@ -22,16 +22,28 @@
  */
 void packet_flush(int fd);
 void packet_delim(int fd);
+void packet_response_end(int fd);
 void packet_write_fmt(int fd, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
 void packet_buf_flush(struct strbuf *buf);
 void packet_buf_delim(struct strbuf *buf);
+void set_packet_header(char *buf, int size);
 void packet_write(int fd_out, const char *buf, size_t size);
 void packet_buf_write(struct strbuf *buf, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
-void packet_buf_write_len(struct strbuf *buf, const char *data, size_t len);
 int packet_flush_gently(int fd);
 int packet_write_fmt_gently(int fd, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
-int write_packetized_from_fd(int fd_in, int fd_out);
-int write_packetized_from_buf(const char *src_in, size_t len, int fd_out);
+int write_packetized_from_fd_no_flush(int fd_in, int fd_out);
+int write_packetized_from_buf_no_flush(const char *src_in, size_t len, int fd_out);
+
+/*
+ * Stdio versions of packet_write functions. When mixing these with fd
+ * based functions, take care to call fflush(3) before doing fd writes or
+ * closing the fd.
+ */
+void packet_fwrite(FILE *f, const char *buf, size_t size);
+void packet_fwrite_fmt(FILE *f, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
+
+/* packet_fflush writes a flush packet and flushes the stdio buffer of f */
+void packet_fflush(FILE *f);
 
 /*
  * Read a packetized line into the buffer, which must be at least size bytes
@@ -66,17 +78,30 @@ int write_packetized_from_buf(const char *src_in, size_t len, int fd_out);
  *
  * If options contains PACKET_READ_DIE_ON_ERR_PACKET, it dies when it sees an
  * ERR packet.
+ *
+ * If options contains PACKET_READ_GENTLE_ON_READ_ERROR, we will not die
+ * on read errors, but instead return -1.  However, we may still die on an
+ * ERR packet (if requested).
  */
-#define PACKET_READ_GENTLE_ON_EOF     (1u<<0)
-#define PACKET_READ_CHOMP_NEWLINE     (1u<<1)
-#define PACKET_READ_DIE_ON_ERR_PACKET (1u<<2)
-int packet_read(int fd, char **src_buffer, size_t *src_len, char
-		*buffer, unsigned size, int options);
+#define PACKET_READ_GENTLE_ON_EOF        (1u<<0)
+#define PACKET_READ_CHOMP_NEWLINE        (1u<<1)
+#define PACKET_READ_DIE_ON_ERR_PACKET    (1u<<2)
+#define PACKET_READ_GENTLE_ON_READ_ERROR (1u<<3)
+int packet_read(int fd, char *buffer, unsigned size, int options);
+
+/*
+ * Convert a four hex digit packet line length header into its numeric
+ * representation.
+ *
+ * If lenbuf_hex contains non-hex characters, return -1. Otherwise, return the
+ * numeric value of the length header.
+ */
+int packet_length(const char lenbuf_hex[4]);
 
 /*
  * Read a packetized line into a buffer like the 'packet_read()' function but
  * returns an 'enum packet_read_status' which indicates the status of the read.
- * The number of bytes read will be assigined to *pktlen if the status of the
+ * The number of bytes read will be assigned to *pktlen if the status of the
  * read was 'PACKET_READ_NORMAL'.
  */
 enum packet_read_status {
@@ -84,6 +109,7 @@ enum packet_read_status {
 	PACKET_READ_NORMAL,
 	PACKET_READ_FLUSH,
 	PACKET_READ_DELIM,
+	PACKET_READ_RESPONSE_END,
 };
 enum packet_read_status packet_read_with_status(int fd, char **src_buffer,
 						size_t *src_len, char *buffer,
@@ -111,15 +137,9 @@ char *packet_read_line(int fd, int *size);
 int packet_read_line_gently(int fd, int *size, char **dst_line);
 
 /*
- * Same as packet_read_line, but read from a buf rather than a descriptor;
- * see packet_read for details on how src_* is used.
- */
-char *packet_read_line_buf(char **src_buf, size_t *src_len, int *size);
-
-/*
  * Reads a stream of variable sized packets until a flush packet is detected.
  */
-ssize_t read_packetized_to_strbuf(int fd_in, struct strbuf *sb_out);
+ssize_t read_packetized_to_strbuf(int fd_in, struct strbuf *sb_out, int options);
 
 /*
  * Receive multiplexed output stream over git native protocol.
@@ -165,15 +185,18 @@ struct packet_reader {
 
 	unsigned use_sideband : 1;
 	const char *me;
+
+	/* hash algorithm in use */
+	const struct git_hash_algo *hash_algo;
 };
 
 /*
  * Initialize a 'struct packet_reader' object which is an
  * abstraction around the 'packet_read_with_status()' function.
  */
-extern void packet_reader_init(struct packet_reader *reader, int fd,
-			       char *src_buffer, size_t src_len,
-			       int options);
+void packet_reader_init(struct packet_reader *reader, int fd,
+			char *src_buffer, size_t src_len,
+			int options);
 
 /*
  * Perform a packet read and return the status of the read.
@@ -185,7 +208,7 @@ extern void packet_reader_init(struct packet_reader *reader, int fd,
  *		       'line' is set to point at the read line
  * PACKET_READ_FLUSH: 'pktlen' is set to '0' and 'line' is set to NULL
  */
-extern enum packet_read_status packet_reader_read(struct packet_reader *reader);
+enum packet_read_status packet_reader_read(struct packet_reader *reader);
 
 /*
  * Peek the next packet line without consuming it and return the status.
@@ -195,7 +218,7 @@ extern enum packet_read_status packet_reader_read(struct packet_reader *reader);
  * Peeking multiple times without calling 'packet_reader_read()' will return
  * the same result.
  */
-extern enum packet_read_status packet_reader_peek(struct packet_reader *reader);
+enum packet_read_status packet_reader_peek(struct packet_reader *reader);
 
 #define DEFAULT_PACKET_MAX 1000
 #define LARGE_PACKET_MAX 65520

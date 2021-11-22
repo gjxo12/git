@@ -40,7 +40,8 @@ static void hash_fd(int fd, const char *type, const char *path, unsigned flags,
 	if (fstat(fd, &st) < 0 ||
 	    (literally
 	     ? hash_literally(&oid, fd, type, flags)
-	     : index_fd(&the_index, &oid, fd, &st, type_from_string(type), path, flags)))
+	     : index_fd(the_repository->index, &oid, fd, &st,
+			type_from_string(type), path, flags)))
 		die((flags & HASH_WRITE_OBJECT)
 		    ? "Unable to add %s to database"
 		    : "Unable to hash %s", path);
@@ -52,9 +53,7 @@ static void hash_object(const char *path, const char *type, const char *vpath,
 			unsigned flags, int literally)
 {
 	int fd;
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		die_errno("Cannot open '%s'", path);
+	fd = xopen(path, O_RDONLY);
 	hash_fd(fd, type, vpath, flags, literally);
 }
 
@@ -107,7 +106,7 @@ int cmd_hash_object(int argc, const char **argv, const char *prefix)
 	int i;
 	const char *errstr = NULL;
 
-	argc = parse_options(argc, argv, NULL, hash_object_options,
+	argc = parse_options(argc, argv, prefix, hash_object_options,
 			     hash_object_usage, 0);
 
 	if (flags & HASH_WRITE_OBJECT)
@@ -116,7 +115,7 @@ int cmd_hash_object(int argc, const char **argv, const char *prefix)
 		prefix = setup_git_directory_gently(&nongit);
 
 	if (vpath && prefix)
-		vpath = xstrdup(prefix_filename(prefix, vpath));
+		vpath = prefix_filename(prefix, vpath);
 
 	git_config(git_default_config, NULL);
 

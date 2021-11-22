@@ -2,6 +2,9 @@
 
 test_description='git p4 submit'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./lib-git-p4.sh
 
 test_expect_success 'start p4d' '
@@ -114,7 +117,7 @@ test_expect_success 'submit with allowSubmit' '
 		git config git-p4.skipSubmitEdit true &&
 		git config git-p4.allowSubmit "nobranch" &&
 		test_must_fail git p4 submit &&
-		git config git-p4.allowSubmit "nobranch,master" &&
+		git config git-p4.allowSubmit "nobranch,main" &&
 		git p4 submit
 	)
 '
@@ -591,10 +594,6 @@ test_expect_success 'update a shelve involving moved and copied files' '
 		p4 changes moved/file_to_move | grep "Testing update-shelve" &&
 		p4 changes copy_of_file | grep "Testing update-shelve"
 	)
-'
-
-test_expect_success 'kill p4d' '
-	kill_p4d
 '
 
 test_done

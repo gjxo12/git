@@ -165,6 +165,15 @@ test_expect_success 'absolute path rejects the empty string' '
 	test_must_fail test-tool path-utils absolute_path ""
 '
 
+test_expect_success MINGW '<drive-letter>:\\abc is an absolute path' '
+	for letter in : \" C Z 1 ä
+	do
+		path=$letter:\\abc &&
+		absolute="$(test-tool path-utils absolute_path "$path")" &&
+		test "$path" = "$absolute" || return 1
+	done
+'
+
 test_expect_success 'real path rejects the empty string' '
 	test_must_fail test-tool path-utils real_path ""
 '
@@ -285,9 +294,13 @@ test_git_path GIT_OBJECT_DIRECTORY=foo objects/foo foo/foo
 test_git_path GIT_OBJECT_DIRECTORY=foo objects2 .git/objects2
 test_expect_success 'setup common repository' 'git --git-dir=bar init'
 test_git_path GIT_COMMON_DIR=bar index                    .git/index
+test_git_path GIT_COMMON_DIR=bar index.lock               .git/index.lock
 test_git_path GIT_COMMON_DIR=bar HEAD                     .git/HEAD
 test_git_path GIT_COMMON_DIR=bar logs/HEAD                .git/logs/HEAD
+test_git_path GIT_COMMON_DIR=bar logs/HEAD.lock           .git/logs/HEAD.lock
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisect/foo     .git/logs/refs/bisect/foo
+test_git_path GIT_COMMON_DIR=bar logs/refs                bar/logs/refs
+test_git_path GIT_COMMON_DIR=bar logs/refs/               bar/logs/refs/
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisec/foo      bar/logs/refs/bisec/foo
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisec          bar/logs/refs/bisec
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisectfoo      bar/logs/refs/bisectfoo
@@ -299,8 +312,8 @@ test_git_path GIT_COMMON_DIR=bar info/sparse-checkout     .git/info/sparse-check
 test_git_path GIT_COMMON_DIR=bar info//sparse-checkout    .git/info//sparse-checkout
 test_git_path GIT_COMMON_DIR=bar remotes/bar              bar/remotes/bar
 test_git_path GIT_COMMON_DIR=bar branches/bar             bar/branches/bar
-test_git_path GIT_COMMON_DIR=bar logs/refs/heads/master   bar/logs/refs/heads/master
-test_git_path GIT_COMMON_DIR=bar refs/heads/master        bar/refs/heads/master
+test_git_path GIT_COMMON_DIR=bar logs/refs/heads/main     bar/logs/refs/heads/main
+test_git_path GIT_COMMON_DIR=bar refs/heads/main          bar/refs/heads/main
 test_git_path GIT_COMMON_DIR=bar refs/bisect/foo          .git/refs/bisect/foo
 test_git_path GIT_COMMON_DIR=bar hooks/me                 bar/hooks/me
 test_git_path GIT_COMMON_DIR=bar config                   bar/config
@@ -423,6 +436,9 @@ test_expect_success 'match .gitmodules' '
 		~1000000 \
 		~9999999 \
 		\
+		.gitmodules:\$DATA \
+		"gitmod~4 . :\$DATA" \
+		\
 		--not \
 		".gitmodules x"  \
 		".gitmodules .x" \
@@ -447,7 +463,92 @@ test_expect_success 'match .gitmodules' '
 		\
 		GI7EB~1 \
 		GI7EB~01 \
-		GI7EB~1X
+		GI7EB~1X \
+		\
+		.gitmodules,:\$DATA
+'
+
+test_expect_success 'match .gitattributes' '
+	test-tool path-utils is_dotgitattributes \
+		.gitattributes \
+		.git${u200c}attributes \
+		.Gitattributes \
+		.gitattributeS \
+		GITATT~1 \
+		GI7D29~1
+'
+
+test_expect_success 'match .gitignore' '
+	test-tool path-utils is_dotgitignore \
+		.gitignore \
+		.git${u200c}ignore \
+		.Gitignore \
+		.gitignorE \
+		GITIGN~1 \
+		GI250A~1
+'
+
+test_expect_success 'match .mailmap' '
+	test-tool path-utils is_dotmailmap \
+		.mailmap \
+		.mail${u200c}map \
+		.Mailmap \
+		.mailmaP \
+		MAILMA~1 \
+		MABA30~1
+'
+
+test_expect_success MINGW 'is_valid_path() on Windows' '
+	test-tool path-utils is_valid_path \
+		win32 \
+		"win32 x" \
+		../hello.txt \
+		C:\\git \
+		comm \
+		conout.c \
+		com0.c \
+		lptN \
+		\
+		--not \
+		"win32 "  \
+		"win32 /x "  \
+		"win32."  \
+		"win32 . ." \
+		.../hello.txt \
+		colon:test \
+		"AUX.c" \
+		"abc/conOut\$  .xyz/test" \
+		lpt8 \
+		com9.c \
+		"lpt*" \
+		Nul \
+		"PRN./abc"
+'
+
+test_lazy_prereq RUNTIME_PREFIX '
+	test true = "$RUNTIME_PREFIX"
+'
+
+test_lazy_prereq CAN_EXEC_IN_PWD '
+	cp "$GIT_EXEC_PATH"/git$X ./ &&
+	./git rev-parse
+'
+
+test_expect_success RUNTIME_PREFIX,CAN_EXEC_IN_PWD 'RUNTIME_PREFIX works' '
+	mkdir -p pretend/bin pretend/libexec/git-core &&
+	echo "echo HERE" | write_script pretend/libexec/git-core/git-here &&
+	cp "$GIT_EXEC_PATH"/git$X pretend/bin/ &&
+	GIT_EXEC_PATH= ./pretend/bin/git here >actual &&
+	echo HERE >expect &&
+	test_cmp expect actual'
+
+test_expect_success RUNTIME_PREFIX,CAN_EXEC_IN_PWD '%(prefix)/ works' '
+	mkdir -p pretend/bin &&
+	cp "$GIT_EXEC_PATH"/git$X pretend/bin/ &&
+	git config yes.path "%(prefix)/yes" &&
+	GIT_EXEC_PATH= ./pretend/bin/git config --path yes.path >actual &&
+	echo "$(pwd)/pretend/yes" >expect &&
+	test_cmp expect actual
 '
 
 test_done

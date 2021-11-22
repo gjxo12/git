@@ -1,38 +1,25 @@
 #ifndef GREP_H
 #define GREP_H
 #include "color.h"
-#ifdef USE_LIBPCRE1
-#include <pcre.h>
-#ifdef PCRE_CONFIG_JIT
-#if PCRE_MAJOR >= 8 && PCRE_MINOR >= 32
-#ifndef NO_LIBPCRE1_JIT
-#define GIT_PCRE1_USE_JIT
-#define GIT_PCRE_STUDY_JIT_COMPILE PCRE_STUDY_JIT_COMPILE
-#endif
-#endif
-#endif
-#ifndef GIT_PCRE_STUDY_JIT_COMPILE
-#define GIT_PCRE_STUDY_JIT_COMPILE 0
-#endif
-#if PCRE_MAJOR <= 8 && PCRE_MINOR < 20
-typedef int pcre_jit_stack;
-#endif
-#else
-typedef int pcre;
-typedef int pcre_extra;
-typedef int pcre_jit_stack;
-#endif
 #ifdef USE_LIBPCRE2
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
+#if (PCRE2_MAJOR >= 10 && PCRE2_MINOR >= 36) || PCRE2_MAJOR >= 11
+#define GIT_PCRE2_VERSION_10_36_OR_HIGHER
+#endif
+#if (PCRE2_MAJOR >= 10 && PCRE2_MINOR >= 34) || PCRE2_MAJOR >= 11
+#define GIT_PCRE2_VERSION_10_34_OR_HIGHER
+#endif
 #else
 typedef int pcre2_code;
 typedef int pcre2_match_data;
 typedef int pcre2_compile_context;
-typedef int pcre2_match_context;
-typedef int pcre2_jit_stack;
+typedef int pcre2_general_context;
 #endif
-#include "kwset.h"
+#ifndef PCRE2_MATCH_INVALID_UTF
+/* PCRE2_MATCH_* dummy also with !USE_LIBPCRE2, for test-pcre2-config.c */
+#define PCRE2_MATCH_INVALID_UTF 0
+#endif
 #include "thread-utils.h"
 #include "userdiff.h"
 
@@ -86,19 +73,14 @@ struct grep_pat {
 	size_t patternlen;
 	enum grep_header_field field;
 	regex_t regexp;
-	pcre *pcre1_regexp;
-	pcre_extra *pcre1_extra_info;
-	pcre_jit_stack *pcre1_jit_stack;
-	const unsigned char *pcre1_tables;
-	int pcre1_jit_on;
 	pcre2_code *pcre2_pattern;
 	pcre2_match_data *pcre2_match_data;
 	pcre2_compile_context *pcre2_compile_context;
-	pcre2_match_context *pcre2_match_context;
-	pcre2_jit_stack *pcre2_jit_stack;
+	pcre2_general_context *pcre2_general_context;
+	const uint8_t *pcre2_tables;
 	uint32_t pcre2_jit_on;
-	kwset_t kws;
 	unsigned fixed:1;
+	unsigned is_fixed:1;
 	unsigned ignore_case:1;
 	unsigned word_regexp:1;
 };
@@ -138,7 +120,20 @@ struct grep_opt {
 	struct grep_pat *header_list;
 	struct grep_pat **header_tail;
 	struct grep_expr *pattern_expression;
+
+	/*
+	 * NEEDSWORK: See if we can remove this field, because the repository
+	 * should probably be per-source. That is, grep.c functions using this
+	 * field should probably start using "repo" in "struct grep_source"
+	 * instead.
+	 *
+	 * This is potentially the cause of at least one bug - "git grep"
+	 * using the textconv attributes from the superproject on the
+	 * submodules. See the failing "git grep --textconv" tests in
+	 * t7814-grep-recurse-submodules.sh for more information.
+	 */
 	struct repository *repo;
+
 	const char *prefix;
 	int prefix_length;
 	regex_t regexp;
@@ -153,7 +148,6 @@ struct grep_opt {
 	int word_regexp;
 	int fixed;
 	int all_match;
-	int debug;
 #define GREP_BINARY_DEFAULT	0
 #define GREP_BINARY_NOMATCH	1
 #define GREP_BINARY_TEXT	2
@@ -161,7 +155,6 @@ struct grep_opt {
 	int allow_textconv;
 	int extended;
 	int use_reflog_filter;
-	int pcre1;
 	int pcre2;
 	int relative;
 	int pathname;
@@ -173,6 +166,7 @@ struct grep_opt {
 	int funcbody;
 	int extended_regexp_option;
 	int pattern_type_option;
+	int ignore_locale;
 	char colors[NR_GREP_COLORS][COLOR_MAXLEN];
 	unsigned pre_context;
 	unsigned post_context;
@@ -186,17 +180,25 @@ struct grep_opt {
 	void *output_priv;
 };
 
-extern void init_grep_defaults(struct repository *);
-extern int grep_config(const char *var, const char *value, void *);
-extern void grep_init(struct grep_opt *, struct repository *repo, const char *prefix);
+int grep_config(const char *var, const char *value, void *);
+void grep_init(struct grep_opt *, struct repository *repo, const char *prefix);
 void grep_commit_pattern_type(enum grep_pattern_type, struct grep_opt *opt);
 
-extern void append_grep_pat(struct grep_opt *opt, const char *pat, size_t patlen, const char *origin, int no, enum grep_pat_token t);
-extern void append_grep_pattern(struct grep_opt *opt, const char *pat, const char *origin, int no, enum grep_pat_token t);
-extern void append_header_grep_pattern(struct grep_opt *, enum grep_header_field, const char *);
-extern void compile_grep_patterns(struct grep_opt *opt);
-extern void free_grep_patterns(struct grep_opt *opt);
-extern int grep_buffer(struct grep_opt *opt, char *buf, unsigned long size);
+void append_grep_pat(struct grep_opt *opt, const char *pat, size_t patlen, const char *origin, int no, enum grep_pat_token t);
+void append_grep_pattern(struct grep_opt *opt, const char *pat, const char *origin, int no, enum grep_pat_token t);
+void append_header_grep_pattern(struct grep_opt *, enum grep_header_field, const char *);
+void compile_grep_patterns(struct grep_opt *opt);
+void free_grep_patterns(struct grep_opt *opt);
+int grep_buffer(struct grep_opt *opt, const char *buf, unsigned long size);
+
+/* The field parameter is only used to filter header patterns
+ * (where appropriate). If filtering isn't desirable
+ * GREP_HEADER_FIELD_MAX should be supplied.
+ */
+int grep_next_match(struct grep_opt *opt,
+		    const char *bol, const char *eol,
+		    enum grep_context ctx, regmatch_t *pmatch,
+		    enum grep_header_field field, int eflags);
 
 struct grep_source {
 	char *name;
@@ -207,17 +209,20 @@ struct grep_source {
 		GREP_SOURCE_BUF,
 	} type;
 	void *identifier;
+	struct repository *repo; /* if GREP_SOURCE_OID */
 
-	char *buf;
+	const char *buf;
 	unsigned long size;
 
 	char *path; /* for attribute lookups */
 	struct userdiff_driver *driver;
 };
 
-void grep_source_init(struct grep_source *gs, enum grep_source_type type,
-		      const char *name, const char *path,
-		      const void *identifier);
+void grep_source_init_file(struct grep_source *gs, const char *name,
+			   const char *path);
+void grep_source_init_oid(struct grep_source *gs, const char *name,
+			  const char *path, const struct object_id *oid,
+			  struct repository *repo);
 void grep_source_clear_data(struct grep_source *gs);
 void grep_source_clear(struct grep_source *gs);
 void grep_source_load_driver(struct grep_source *gs,
@@ -226,8 +231,7 @@ void grep_source_load_driver(struct grep_source *gs,
 
 int grep_source(struct grep_opt *opt, struct grep_source *gs);
 
-extern struct grep_opt *grep_opt_dup(const struct grep_opt *opt);
-extern int grep_threads_ok(const struct grep_opt *opt);
+struct grep_opt *grep_opt_dup(const struct grep_opt *opt);
 
 /*
  * Mutex used around access to the attributes machinery if
@@ -235,18 +239,5 @@ extern int grep_threads_ok(const struct grep_opt *opt);
  */
 extern int grep_use_locks;
 extern pthread_mutex_t grep_attr_mutex;
-extern pthread_mutex_t grep_read_mutex;
-
-static inline void grep_read_lock(void)
-{
-	if (grep_use_locks)
-		pthread_mutex_lock(&grep_read_mutex);
-}
-
-static inline void grep_read_unlock(void)
-{
-	if (grep_use_locks)
-		pthread_mutex_unlock(&grep_read_mutex);
-}
 
 #endif

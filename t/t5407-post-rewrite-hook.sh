@@ -4,6 +4,9 @@
 #
 
 test_description='Test the post-rewrite hook.'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -14,10 +17,8 @@ test_expect_success 'setup' '
 	git checkout A^0 &&
 	test_commit E bar E &&
 	test_commit F foo F &&
-	git checkout master
+	git checkout main
 '
-
-mkdir .git/hooks
 
 cat >.git/hooks/post-rewrite <<EOF
 #!/bin/sh
@@ -53,10 +54,10 @@ test_expect_success 'git commit --amend --no-post-rewrite' '
 	test ! -f post-rewrite.data
 '
 
-test_expect_success 'git rebase' '
+test_expect_success 'git rebase --apply' '
 	git reset --hard D &&
 	clear_hook_input &&
-	test_must_fail git rebase --onto A B &&
+	test_must_fail git rebase --apply --onto A B &&
 	echo C > foo &&
 	git add foo &&
 	git rebase --continue &&
@@ -68,29 +69,31 @@ test_expect_success 'git rebase' '
 	verify_hook_input
 '
 
-test_expect_success 'git rebase --skip' '
+test_expect_success 'git rebase --apply --skip' '
 	git reset --hard D &&
 	clear_hook_input &&
-	test_must_fail git rebase --onto A B &&
+	test_must_fail git rebase --apply --onto A B &&
 	test_must_fail git rebase --skip &&
 	echo D > foo &&
 	git add foo &&
 	git rebase --continue &&
 	echo rebase >expected.args &&
 	cat >expected.data <<-EOF &&
+	$(git rev-parse C) $(git rev-parse HEAD^)
 	$(git rev-parse D) $(git rev-parse HEAD)
 	EOF
 	verify_hook_input
 '
 
-test_expect_success 'git rebase --skip the last one' '
+test_expect_success 'git rebase --apply --skip the last one' '
 	git reset --hard F &&
 	clear_hook_input &&
-	test_must_fail git rebase --onto D A &&
+	test_must_fail git rebase --apply --onto D A &&
 	git rebase --skip &&
 	echo rebase >expected.args &&
 	cat >expected.data <<-EOF &&
 	$(git rev-parse E) $(git rev-parse HEAD)
+	$(git rev-parse F) $(git rev-parse HEAD)
 	EOF
 	verify_hook_input
 '
@@ -120,6 +123,38 @@ test_expect_success 'git rebase -m --skip' '
 	git rebase --continue &&
 	echo rebase >expected.args &&
 	cat >expected.data <<-EOF &&
+	$(git rev-parse C) $(git rev-parse HEAD^)
+	$(git rev-parse D) $(git rev-parse HEAD)
+	EOF
+	verify_hook_input
+'
+
+test_expect_success 'git rebase with implicit use of merge backend' '
+	git reset --hard D &&
+	clear_hook_input &&
+	test_must_fail git rebase --keep-empty --onto A B &&
+	echo C > foo &&
+	git add foo &&
+	git rebase --continue &&
+	echo rebase >expected.args &&
+	cat >expected.data <<-EOF &&
+	$(git rev-parse C) $(git rev-parse HEAD^)
+	$(git rev-parse D) $(git rev-parse HEAD)
+	EOF
+	verify_hook_input
+'
+
+test_expect_success 'git rebase --skip with implicit use of merge backend' '
+	git reset --hard D &&
+	clear_hook_input &&
+	test_must_fail git rebase --keep-empty --onto A B &&
+	test_must_fail git rebase --skip &&
+	echo D > foo &&
+	git add foo &&
+	git rebase --continue &&
+	echo rebase >expected.args &&
+	cat >expected.data <<-EOF &&
+	$(git rev-parse C) $(git rev-parse HEAD^)
 	$(git rev-parse D) $(git rev-parse HEAD)
 	EOF
 	verify_hook_input

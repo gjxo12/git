@@ -17,36 +17,30 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see http://www.gnu.org/licenses/ .
 
-# do the --tee work early; it otherwise confuses our careful
-# GIT_BUILD_DIR mangling
-case "$GIT_TEST_TEE_STARTED, $* " in
-done,*)
-	# do not redirect again
-	;;
-*' --tee '*|*' --va'*)
-	mkdir -p test-results
-	BASE=test-results/$(basename "$0" .sh)
-	(GIT_TEST_TEE_STARTED=done ${SHELL-sh} "$0" "$@" 2>&1;
-	 echo $? > $BASE.exit) | tee $BASE.out
-	test "$(cat $BASE.exit)" = 0
-	exit
-	;;
-esac
-
+# These variables must be set before the inclusion of test-lib.sh below,
+# because it will change our working directory.
 TEST_DIRECTORY=$(pwd)/..
 TEST_OUTPUT_DIRECTORY=$(pwd)
-if test -z "$GIT_TEST_INSTALLED"; then
-	perf_results_prefix=
-else
-	perf_results_prefix=$(printf "%s" "${GIT_TEST_INSTALLED%/bin-wrappers}" | tr -c "[a-zA-Z0-9]" "[_*]")"."
-	# make the tested dir absolute
-	GIT_TEST_INSTALLED=$(cd "$GIT_TEST_INSTALLED" && pwd)
-fi
 
 TEST_NO_CREATE_REPO=t
 TEST_NO_MALLOC_CHECK=t
 
 . ../test-lib.sh
+
+unset GIT_CONFIG_NOSYSTEM
+GIT_CONFIG_SYSTEM="$TEST_DIRECTORY/perf/config"
+export GIT_CONFIG_SYSTEM
+
+if test -n "$GIT_TEST_INSTALLED" -a -z "$PERF_SET_GIT_TEST_INSTALLED"
+then
+	error "Do not use GIT_TEST_INSTALLED with the perf tests.
+
+Instead use:
+
+    ./run <path-to-git> -- <tests>
+
+See t/perf/README for details."
+fi
 
 # Variables from test-lib that are normally internal to the tests; we
 # need to export them for test_perf subshells
@@ -55,7 +49,7 @@ export TEST_DIRECTORY TRASH_DIRECTORY GIT_BUILD_DIR GIT_TEST_CMP
 MODERN_GIT=$GIT_BUILD_DIR/bin-wrappers/git
 export MODERN_GIT
 
-perf_results_dir=$TEST_OUTPUT_DIRECTORY/test-results
+perf_results_dir=$TEST_RESULTS_DIR
 test -n "$GIT_PERF_SUBSECTION" && perf_results_dir="$perf_results_dir/$GIT_PERF_SUBSECTION"
 mkdir -p "$perf_results_dir"
 rm -f "$perf_results_dir"/$(basename "$0" .sh).subtests
@@ -80,6 +74,19 @@ test_perf_do_repo_symlink_config_ () {
 	test_have_prereq SYMLINKS || git config core.symlinks false
 }
 
+test_perf_copy_repo_contents () {
+	for stuff in "$1"/*
+	do
+		case "$stuff" in
+		*/objects|*/hooks|*/config|*/commondir|*/gitdir|*/worktrees)
+			;;
+		*)
+			cp -R "$stuff" "$repo/.git/" || exit 1
+			;;
+		esac
+	done
+}
+
 test_perf_create_repo_from () {
 	test "$#" = 2 ||
 	BUG "not 2 parameters to test-create-repo"
@@ -87,20 +94,20 @@ test_perf_create_repo_from () {
 	source="$2"
 	source_git="$("$MODERN_GIT" -C "$source" rev-parse --git-dir)"
 	objects_dir="$("$MODERN_GIT" -C "$source" rev-parse --git-path objects)"
+	common_dir="$("$MODERN_GIT" -C "$source" rev-parse --git-common-dir)"
 	mkdir -p "$repo/.git"
 	(
 		cd "$source" &&
 		{ cp -Rl "$objects_dir" "$repo/.git/" 2>/dev/null ||
 			cp -R "$objects_dir" "$repo/.git/"; } &&
-		for stuff in "$source_git"/*; do
-			case "$stuff" in
-				*/objects|*/hooks|*/config|*/commondir)
-					;;
-				*)
-					cp -R "$stuff" "$repo/.git/" || exit 1
-					;;
-			esac
-		done
+
+		# common_dir must come first here, since we want source_git to
+		# take precedence and overwrite any overlapping files
+		test_perf_copy_repo_contents "$common_dir"
+		if test "$source_git" != "$common_dir"
+		then
+			test_perf_copy_repo_contents "$source_git"
+		fi
 	) &&
 	(
 		cd "$repo" &&
@@ -157,14 +164,16 @@ test_run_perf_ () {
 	"$GTIME" -f "%E %U %S" -o test_time.$i "$SHELL" -c '
 . '"$TEST_DIRECTORY"/test-lib-functions.sh'
 test_export () {
-	[ $# != 0 ] || return 0
-	test_export_="$test_export_\\|$1"
-	shift
-	test_export "$@"
+	test_export_="$test_export_ $*"
 }
 '"$1"'
 ret=$?
-set | sed -n "s'"/'/'\\\\''/g"';s/^\\($test_export_\\)/export '"'&'"'/p" >test_vars
+needles=
+for v in $test_export_
+do
+	needles="$needles;s/^$v=/export $v=/p"
+done
+set | sed -n "s'"/'/'\\\\''/g"'$needles" >test_vars
 exit $ret' >&3 2>&4
 	eval_ret=$?
 
@@ -191,7 +200,7 @@ test_wrapper_ () {
 		base=$(basename "$0" .sh)
 		echo "$test_count" >>"$perf_results_dir"/$base.subtests
 		echo "$1" >"$perf_results_dir"/$base.$test_count.descr
-		base="$perf_results_dir"/"$perf_results_prefix$(basename "$0" .sh)"."$test_count"
+		base="$perf_results_dir"/"$PERF_RESULTS_PREFIX$(basename "$0" .sh)"."$test_count"
 		"$test_wrapper_func_" "$@"
 	fi
 
@@ -224,7 +233,8 @@ test_perf_ () {
 	else
 		test_ok_ "$1"
 	fi
-	"$TEST_DIRECTORY"/perf/min_time.perl test_time.* >"$base".times
+	"$TEST_DIRECTORY"/perf/min_time.perl test_time.* >"$base".result
+	rm test_time.*
 }
 
 test_perf () {
@@ -233,7 +243,7 @@ test_perf () {
 
 test_size_ () {
 	say >&3 "running: $2"
-	if test_eval_ "$2" 3>"$base".size; then
+	if test_eval_ "$2" 3>"$base".result; then
 		test_ok_ "$1"
 	else
 		test_failure_ "$@"
@@ -248,10 +258,15 @@ test_size () {
 # and does it after running everything)
 test_at_end_hook_ () {
 	if test -z "$GIT_PERF_AGGREGATING_LATER"; then
-		( cd "$TEST_DIRECTORY"/perf && ./aggregate.perl $(basename "$0") )
+		(
+			cd "$TEST_DIRECTORY"/perf &&
+			./aggregate.perl --results-dir="$TEST_RESULTS_DIR" $(basename "$0")
+		)
 	fi
 }
 
 test_export () {
 	export "$@"
 }
+
+test_lazy_prereq PERF_EXTRA 'test_bool_env GIT_PERF_EXTRA false'

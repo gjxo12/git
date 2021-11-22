@@ -6,7 +6,17 @@
 test_description='git grep various.
 '
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
+
+test_invalid_grep_expression() {
+	params="$@" &&
+	test_expect_success "invalid expression: grep $params" '
+		test_must_fail git grep $params -- nonexisting
+	'
+}
 
 cat >hello.c <<EOF
 #include <assert.h>
@@ -72,6 +82,11 @@ test_expect_success setup '
 	# Still a no-op.
 	function dummy() {}
 	EOF
+	if test_have_prereq FUNNYNAMES
+	then
+		echo unusual >"\"unusual\" pathname" &&
+		echo unusual >"t/nested \"unusual\" pathname"
+	fi &&
 	git add . &&
 	test_tick &&
 	git commit -m initial
@@ -80,6 +95,8 @@ test_expect_success setup '
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '
+
+test_invalid_grep_expression --and -e A
 
 for H in HEAD ''
 do
@@ -119,33 +136,33 @@ do
 		test_cmp expected actual
 	'
 
-	test_expect_success "grep -w $L (with --column, --invert)" '
+	test_expect_success "grep -w $L (with --column, --invert-match)" '
 		{
 			echo ${HC}file:1:foo mmap bar
 			echo ${HC}file:1:foo_mmap bar
 			echo ${HC}file:1:foo_mmap bar mmap
 			echo ${HC}file:1:foo mmap bar_mmap
 		} >expected &&
-		git grep --column --invert -w -e baz $H -- file >actual &&
+		git grep --column --invert-match -w -e baz $H -- file >actual &&
 		test_cmp expected actual
 	'
 
-	test_expect_success "grep $L (with --column, --invert, extended OR)" '
+	test_expect_success "grep $L (with --column, --invert-match, extended OR)" '
 		{
 			echo ${HC}hello_world:6:HeLLo_world
 		} >expected &&
-		git grep --column --invert -e ll --or --not -e _ $H -- hello_world \
+		git grep --column --invert-match -e ll --or --not -e _ $H -- hello_world \
 			>actual &&
 		test_cmp expected actual
 	'
 
-	test_expect_success "grep $L (with --column, --invert, extended AND)" '
+	test_expect_success "grep $L (with --column, --invert-match, extended AND)" '
 		{
 			echo ${HC}hello_world:3:Hello world
 			echo ${HC}hello_world:3:Hello_world
 			echo ${HC}hello_world:6:HeLLo_world
 		} >expected &&
-		git grep --column --invert --not -e _ --and --not -e ll $H -- hello_world \
+		git grep --column --invert-match --not -e _ --and --not -e ll $H -- hello_world \
 			>actual &&
 		test_cmp expected actual
 	'
@@ -412,7 +429,7 @@ do
 		test_cmp expected actual
 	'
 
-	test_expect_success !PCRE "grep $L with grep.patterntype=perl errors without PCRE" '
+	test_expect_success !FAIL_PREREQS,!PCRE "grep $L with grep.patterntype=perl errors without PCRE" '
 		test_must_fail git -c grep.patterntype=perl grep "foo.*bar"
 	'
 
@@ -480,6 +497,48 @@ do
 		echo 3 >expected &&
 		git grep --count -h -e b $H -- ab >actual &&
 		test_cmp expected actual
+	'
+
+	test_expect_success FUNNYNAMES "grep $L should quote unusual pathnames" '
+		cat >expected <<-EOF &&
+		${HC}"\"unusual\" pathname":unusual
+		${HC}"t/nested \"unusual\" pathname":unusual
+		EOF
+		git grep unusual $H >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success FUNNYNAMES "grep $L in subdir should quote unusual relative pathnames" '
+		cat >expected <<-EOF &&
+		${HC}"nested \"unusual\" pathname":unusual
+		EOF
+		(
+			cd t &&
+			git grep unusual $H
+		) >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success FUNNYNAMES "grep -z $L with unusual pathnames" '
+		cat >expected <<-EOF &&
+		${HC}"unusual" pathname:unusual
+		${HC}t/nested "unusual" pathname:unusual
+		EOF
+		git grep -z unusual $H >actual &&
+		tr "\0" ":" <actual >actual-replace-null &&
+		test_cmp expected actual-replace-null
+	'
+
+	test_expect_success FUNNYNAMES "grep -z $L in subdir with unusual relative pathnames" '
+		cat >expected <<-EOF &&
+		${HC}nested "unusual" pathname:unusual
+		EOF
+		(
+			cd t &&
+			git grep -z unusual $H
+		) >actual &&
+		tr "\0" ":" <actual >actual-replace-null &&
+		test_cmp expected actual-replace-null
 	'
 done
 
@@ -640,21 +699,9 @@ test_expect_success 'grep -C1 hunk mark between files' '
 '
 
 test_expect_success 'log grep setup' '
-	echo a >>file &&
-	test_tick &&
-	GIT_AUTHOR_NAME="With * Asterisk" \
-	GIT_AUTHOR_EMAIL="xyzzy@frotz.com" \
-	git commit -a -m "second" &&
-
-	echo a >>file &&
-	test_tick &&
-	git commit -a -m "third" &&
-
-	echo a >>file &&
-	test_tick &&
-	GIT_AUTHOR_NAME="Night Fall" \
-	GIT_AUTHOR_EMAIL="nitfol@frobozz.com" \
-	git commit -a -m "fourth"
+	test_commit --append --author "With * Asterisk <xyzzy@frotz.com>" second file a &&
+	test_commit --append third file a &&
+	test_commit --append --author "Night Fall <nitfol@frobozz.com>" fourth file a
 '
 
 test_expect_success 'log grep (1)' '
@@ -931,7 +978,8 @@ do
 	"
 done
 
-test_expect_success !PTHREADS,C_LOCALE_OUTPUT 'grep --threads=N or pack.threads=N warns when no pthreads' '
+test_expect_success !PTHREADS,!FAIL_PREREQS \
+	'grep --threads=N or pack.threads=N warns when no pthreads' '
 	git grep --threads=2 Hello hello_world 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
@@ -1010,7 +1058,7 @@ test_expect_success 'outside of git repository' '
 			echo ".gitignore:.*o*" &&
 			cat ../expect.full
 		} >../expect.with.ignored &&
-		git grep --no-index --no-exclude o >../actual.full &&
+		git grep --no-index --no-exclude-standard o >../actual.full &&
 		test_cmp ../expect.with.ignored ../actual.full
 	)
 '
@@ -1051,7 +1099,7 @@ test_expect_success 'outside of git repository with fallbackToNoIndex' '
 			echo ".gitignore:.*o*" &&
 			cat ../expect.full
 		} >../expect.with.ignored &&
-		git -c grep.fallbackToNoIndex grep --no-exclude o >../actual.full &&
+		git -c grep.fallbackToNoIndex grep --no-exclude-standard o >../actual.full &&
 		test_cmp ../expect.with.ignored ../actual.full
 	)
 '
@@ -1159,19 +1207,19 @@ test_expect_success 'grep -e -- -- path' '
 '
 
 test_expect_success 'dashdash disambiguates rev as rev' '
-	test_when_finished "rm -f master" &&
-	echo content >master &&
-	echo master:hello.c >expect &&
-	git grep -l o master -- hello.c >actual &&
+	test_when_finished "rm -f main" &&
+	echo content >main &&
+	echo main:hello.c >expect &&
+	git grep -l o main -- hello.c >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'dashdash disambiguates pathspec as pathspec' '
-	test_when_finished "git rm -f master" &&
-	echo content >master &&
-	git add master &&
-	echo master:content >expect &&
-	git grep o -- master >actual &&
+	test_when_finished "git rm -f main" &&
+	echo content >main &&
+	git add main &&
+	echo main:content >expect &&
+	git grep o -- main >actual &&
 	test_cmp expect actual
 '
 
@@ -1207,15 +1255,15 @@ test_expect_success 'grep --no-index pattern -- path' '
 '
 
 test_expect_success 'grep --no-index complains of revs' '
-	test_must_fail git grep --no-index o master -- 2>err &&
+	test_must_fail git grep --no-index o main -- 2>err &&
 	test_i18ngrep "cannot be used with revs" err
 '
 
 test_expect_success 'grep --no-index prefers paths to revs' '
-	test_when_finished "rm -f master" &&
-	echo content >master &&
-	echo master:content >expect &&
-	git grep --no-index o master >actual &&
+	test_when_finished "rm -f main" &&
+	echo content >main &&
+	echo main:content >expect &&
+	git grep --no-index o main >actual &&
 	test_cmp expect actual
 '
 
@@ -1234,7 +1282,7 @@ test_expect_success PCRE 'grep --perl-regexp pattern' '
 	test_cmp expected actual
 '
 
-test_expect_success !PCRE 'grep --perl-regexp pattern errors without PCRE' '
+test_expect_success !FAIL_PREREQS,!PCRE 'grep --perl-regexp pattern errors without PCRE' '
 	test_must_fail git grep --perl-regexp "foo.*bar"
 '
 
@@ -1249,7 +1297,7 @@ test_expect_success LIBPCRE2 "grep -P with (*NO_JIT) doesn't error out" '
 
 '
 
-test_expect_success !PCRE 'grep -P pattern errors without PCRE' '
+test_expect_success !FAIL_PREREQS,!PCRE 'grep -P pattern errors without PCRE' '
 	test_must_fail git grep -P "foo.*bar"
 '
 

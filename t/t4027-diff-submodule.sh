@@ -3,7 +3,7 @@
 test_description='difference in submodules'
 
 . ./test-lib.sh
-. "$TEST_DIRECTORY"/diff-lib.sh
+. "$TEST_DIRECTORY"/lib-diff.sh
 
 test_expect_success setup '
 	test_tick &&
@@ -36,7 +36,8 @@ test_expect_success setup '
 '
 
 test_expect_success 'git diff --raw HEAD' '
-	git diff --raw --abbrev=40 HEAD >actual &&
+	hexsz=$(test_oid hexsz) &&
+	git diff --raw --abbrev=$hexsz HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -90,6 +91,14 @@ test_expect_success 'git diff HEAD with dirty submodule (untracked)' '
 		git clean -qfdx &&
 		>cruft
 	) &&
+	git diff HEAD >actual &&
+	sed -e "1,/^@@/d" actual >actual.body &&
+	expect_from_to >expect.body $subtip $subprev &&
+	test_cmp expect.body actual.body
+'
+
+test_expect_success 'git diff HEAD with dirty submodule (untracked) (none ignored)' '
+	test_config diff.ignoreSubmodules none &&
 	git diff HEAD >actual &&
 	sed -e "1,/^@@/d" actual >actual.body &&
 	expect_from_to >expect.body $subtip $subprev-dirty &&
@@ -167,13 +176,13 @@ test_expect_success 'git diff HEAD with dirty submodule (untracked, refs match)'
 		git clean -qfdx &&
 		>cruft
 	) &&
-	git diff HEAD >actual &&
+	git diff --ignore-submodules=none HEAD >actual &&
 	sed -e "1,/^@@/d" actual >actual.body &&
 	expect_from_to >expect.body $subprev $subprev-dirty &&
 	test_cmp expect.body actual.body &&
 	git diff --ignore-submodules=all HEAD >actual2 &&
 	test_must_be_empty actual2 &&
-	git diff --ignore-submodules=untracked HEAD >actual3 &&
+	git diff HEAD >actual3 &&
 	test_must_be_empty actual3 &&
 	git diff --ignore-submodules=dirty HEAD >actual4 &&
 	test_must_be_empty actual4
@@ -245,23 +254,21 @@ test_expect_success 'git diff (empty submodule dir)' '
 '
 
 test_expect_success 'conflicted submodule setup' '
-
-	# 39 efs
-	c=fffffffffffffffffffffffffffffffffffffff &&
+	c=$(test_oid ff_1) &&
 	(
 		echo "000000 $ZERO_OID 0	sub" &&
 		echo "160000 1$c 1	sub" &&
 		echo "160000 2$c 2	sub" &&
 		echo "160000 3$c 3	sub"
 	) | git update-index --index-info &&
-	echo >expect.nosub '\''diff --cc sub
+	echo >expect.nosub "diff --cc sub
 index 2ffffff,3ffffff..0000000
 --- a/sub
 +++ b/sub
 @@@ -1,1 -1,1 +1,1 @@@
-- Subproject commit 2fffffffffffffffffffffffffffffffffffffff
- -Subproject commit 3fffffffffffffffffffffffffffffffffffffff
-++Subproject commit 0000000000000000000000000000000000000000'\'' &&
+- Subproject commit 2$c
+ -Subproject commit 3$c
+++Subproject commit $ZERO_OID" &&
 
 	hh=$(git rev-parse HEAD) &&
 	sed -e "s/$ZERO_OID/$hh/" expect.nosub >expect.withsub

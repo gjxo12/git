@@ -5,11 +5,8 @@ test_description='ls-files tests with relative paths
 This test runs git ls-files with various relative path arguments.
 '
 
+TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
-
-new_line='
-'
-sq=\'
 
 test_expect_success 'prepare' '
 	: >never-mind-me &&
@@ -44,13 +41,13 @@ test_expect_success 'ls-files -c' '
 		cd top/sub &&
 		for f in ../y*
 		do
-			echo "error: pathspec $sq$f$sq did not match any file(s) known to git"
+			echo "error: pathspec $SQ$f$SQ did not match any file(s) known to git"
 		done >expect.err &&
-		echo "Did you forget to ${sq}git add${sq}?" >>expect.err &&
+		echo "Did you forget to ${SQ}git add${SQ}?" >>expect.err &&
 		ls ../x* >expect.out &&
 		test_must_fail git ls-files -c --error-unmatch ../[xy]* >actual.out 2>actual.err &&
 		test_cmp expect.out actual.out &&
-		test_i18ncmp expect.err actual.err
+		test_cmp expect.err actual.err
 	)
 '
 
@@ -59,13 +56,13 @@ test_expect_success 'ls-files -o' '
 		cd top/sub &&
 		for f in ../x*
 		do
-			echo "error: pathspec $sq$f$sq did not match any file(s) known to git"
+			echo "error: pathspec $SQ$f$SQ did not match any file(s) known to git"
 		done >expect.err &&
-		echo "Did you forget to ${sq}git add${sq}?" >>expect.err &&
+		echo "Did you forget to ${SQ}git add${SQ}?" >>expect.err &&
 		ls ../y* >expect.out &&
 		test_must_fail git ls-files -o --error-unmatch ../[xy]* >actual.out 2>actual.err &&
 		test_cmp expect.out actual.out &&
-		test_i18ncmp expect.err actual.err
+		test_cmp expect.err actual.err
 	)
 '
 

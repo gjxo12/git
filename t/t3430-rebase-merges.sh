@@ -12,20 +12,22 @@ Initial setup:
 
     -- B --                   (first)
    /       \
- A - C - D - E - H            (master)
+ A - C - D - E - H            (main)
    \    \       /
     \    F - G                (second)
      \
       Conflicting-G
 '
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-rebase.sh
+. "$TEST_DIRECTORY"/lib-log-graph.sh
 
 test_cmp_graph () {
 	cat >expect &&
-	git log --graph --boundary --format=%s "$@" >output &&
-	sed "s/ *$//" <output >output.trimmed &&
-	test_cmp expect output.trimmed
+	lib_test_cmp_graph --boundary --format=%s "$@"
 }
 
 test_expect_success 'setup' '
@@ -37,20 +39,27 @@ test_expect_success 'setup' '
 	test_commit A &&
 	git checkout -b first &&
 	test_commit B &&
-	git checkout master &&
+	b=$(git rev-parse --short HEAD) &&
+	git checkout main &&
 	test_commit C &&
+	c=$(git rev-parse --short HEAD) &&
 	test_commit D &&
+	d=$(git rev-parse --short HEAD) &&
 	git merge --no-commit B &&
 	test_tick &&
 	git commit -m E &&
 	git tag -m E E &&
+	e=$(git rev-parse --short HEAD) &&
 	git checkout -b second C &&
 	test_commit F &&
+	f=$(git rev-parse --short HEAD) &&
 	test_commit G &&
-	git checkout master &&
+	g=$(git rev-parse --short HEAD) &&
+	git checkout main &&
 	git merge --no-commit G &&
 	test_tick &&
 	git commit -m H &&
+	h=$(git rev-parse --short HEAD) &&
 	git tag -m H H &&
 	git checkout A &&
 	test_commit conflicting-G G.t
@@ -76,7 +85,7 @@ test_expect_success 'create completely different structure' '
 	EOF
 	test_config sequence.editor \""$PWD"/replace-editor.sh\" &&
 	test_tick &&
-	git rebase -i -r A master &&
+	git rebase -i -r A main &&
 	test_cmp_graph <<-\EOF
 	*   Merge the topic branch '\''onebranch'\''
 	|\
@@ -93,24 +102,24 @@ test_expect_success 'create completely different structure' '
 '
 
 test_expect_success 'generate correct todo list' '
-	cat >expect <<-\EOF &&
+	cat >expect <<-EOF &&
 	label onto
 
 	reset onto
-	pick d9df450 B
+	pick $b B
 	label E
 
 	reset onto
-	pick 5dee784 C
+	pick $c C
 	label branch-point
-	pick ca2c861 F
-	pick 088b00a G
+	pick $f F
+	pick $g G
 	label H
 
 	reset branch-point # C
-	pick 12bd07b D
-	merge -C 2051b56 E # E
-	merge -C 233d48a H # H
+	pick $d D
+	merge -C $e E # E
+	merge -C $h H # H
 
 	EOF
 
@@ -151,7 +160,6 @@ test_expect_success 'failed `merge -C` writes patch (may be rescheduled, too)' '
 	test_path_is_file .git/rebase-merge/patch
 '
 
-SQ="'"
 test_expect_success 'failed `merge <branch>` does not crash' '
 	test_when_finished "test_might_fail git rebase --abort" &&
 	git checkout conflicting-G &&
@@ -164,8 +172,41 @@ test_expect_success 'failed `merge <branch>` does not crash' '
 	grep "^Merge branch ${SQ}G${SQ}$" .git/rebase-merge/message
 '
 
+test_expect_success 'merge -c commits before rewording and reloads todo-list' '
+	cat >script-from-scratch <<-\EOF &&
+	merge -c E B
+	merge -c H G
+	EOF
+
+	git checkout -b merge-c H &&
+	(
+		set_reword_editor &&
+		GIT_SEQUENCE_EDITOR="\"$PWD/replace-editor.sh\"" \
+			git rebase -i -r D
+	) &&
+	check_reworded_commits E H
+'
+
+test_expect_success 'merge -c rewords when a strategy is given' '
+	git checkout -b merge-c-with-strategy H &&
+	write_script git-merge-override <<-\EOF &&
+	echo overridden$1 >G.t
+	git add G.t
+	EOF
+
+	PATH="$PWD:$PATH" \
+	GIT_SEQUENCE_EDITOR="echo merge -c H G >" \
+	GIT_EDITOR="echo edited >>" \
+		git rebase --no-ff -ir -s override -Xxopt E &&
+	test_write_lines overridden--xopt >expect &&
+	test_cmp expect G.t &&
+	test_write_lines H "" edited "" >expect &&
+	git log --format=%B -1 >actual &&
+	test_cmp expect actual
+
+'
 test_expect_success 'with a branch tip that was cherry-picked already' '
-	git checkout -b already-upstream master &&
+	git checkout -b already-upstream main &&
 	base="$(git rev-parse --verify HEAD)" &&
 
 	test_commit A1 &&
@@ -193,7 +234,7 @@ test_expect_success 'with a branch tip that was cherry-picked already' '
 '
 
 test_expect_success 'do not rebase cousins unless asked for' '
-	git checkout -b cousins master &&
+	git checkout -b cousins main &&
 	before="$(git rev-parse --verify HEAD)" &&
 	test_tick &&
 	git rebase -r HEAD^ &&
@@ -224,8 +265,24 @@ test_expect_success 'refs/rewritten/* is worktree-local' '
 	test_cmp_rev HEAD "$(cat wt/b)"
 '
 
+test_expect_success '--abort cleans up refs/rewritten' '
+	git checkout -b abort-cleans-refs-rewritten H &&
+	GIT_SEQUENCE_EDITOR="echo break >>" git rebase -ir @^ &&
+	git rev-parse --verify refs/rewritten/onto &&
+	git rebase --abort &&
+	test_must_fail git rev-parse --verify refs/rewritten/onto
+'
+
+test_expect_success '--quit cleans up refs/rewritten' '
+	git checkout -b quit-cleans-refs-rewritten H &&
+	GIT_SEQUENCE_EDITOR="echo break >>" git rebase -ir @^ &&
+	git rev-parse --verify refs/rewritten/onto &&
+	git rebase --quit &&
+	test_must_fail git rev-parse --verify refs/rewritten/onto
+'
+
 test_expect_success 'post-rewrite hook and fixups work for merges' '
-	git checkout -b post-rewrite &&
+	git checkout -b post-rewrite H &&
 	test_commit same1 &&
 	git reset --hard HEAD^ &&
 	test_commit same2 &&
@@ -271,7 +328,7 @@ test_expect_success 'root commits' '
 	EOF
 	test_config sequence.editor \""$PWD"/replace-editor.sh\" &&
 	test_tick &&
-	git rebase -i --force --root -r &&
+	git rebase -i --force-rebase --root -r &&
 	test "Parsnip" = "$(git show -s --format=%an HEAD^)" &&
 	test $(git rev-parse second-root^0) != $(git rev-parse HEAD^) &&
 	test $(git rev-parse second-root:second-root.t) = \
@@ -306,12 +363,12 @@ test_expect_success 'a "merge" into a root commit is a fast-forward' '
 test_expect_success 'A root commit can be a cousin, treat it that way' '
 	git checkout --orphan khnum &&
 	test_commit yama &&
-	git checkout -b asherah master &&
+	git checkout -b asherah main &&
 	test_commit shamkat &&
 	git merge --allow-unrelated-histories khnum &&
 	test_tick &&
 	git rebase -f -r HEAD^ &&
-	! test_cmp_rev HEAD^2 khnum &&
+	test_cmp_rev ! HEAD^2 khnum &&
 	test_cmp_graph HEAD^.. <<-\EOF &&
 	*   Merge branch '\''khnum'\'' into asherah
 	|\
@@ -333,7 +390,7 @@ test_expect_success 'labels that are object IDs are rewritten' '
 	git checkout -b third B &&
 	test_commit I &&
 	third=$(git rev-parse HEAD) &&
-	git checkout -b labels master &&
+	git checkout -b labels main &&
 	git merge --no-commit third &&
 	test_tick &&
 	git commit -m "Merge commit '\''$third'\'' into labels" &&
@@ -364,7 +421,7 @@ test_expect_success 'octopus merges' '
 	test_cmp_rev HEAD $before &&
 
 	test_tick &&
-	git rebase -i --force -r HEAD^^ &&
+	git rebase -i --force-rebase -r HEAD^^ &&
 	test "Hank" = "$(git show -s --format=%an HEAD)" &&
 	test "$before" != $(git rev-parse HEAD) &&
 	test_cmp_graph HEAD^^.. <<-\EOF
@@ -373,7 +430,7 @@ test_expect_success 'octopus merges' '
 	| | * three
 	| * | two
 	| |/
-	* | one
+	* / one
 	|/
 	o before-octopus
 	EOF
@@ -386,7 +443,7 @@ test_expect_success 'with --autosquash and --exec' '
 	git commit --fixup B B.t &&
 	write_script show.sh <<-\EOF &&
 	subject="$(git show -s --format=%s HEAD)"
-	content="$(git diff HEAD^! | tail -n 1)"
+	content="$(git diff HEAD^ HEAD | tail -n 1)"
 	echo "$subject: $content"
 	EOF
 	test_tick &&
@@ -410,6 +467,54 @@ test_expect_success '--continue after resolving conflicts after a merge' '
 	git rebase --continue &&
 	test_must_fail git rev-parse --verify HEAD^2 &&
 	test_path_is_missing .git/MERGE_HEAD
+'
+
+test_expect_success '--rebase-merges with strategies' '
+	git checkout -b with-a-strategy F &&
+	test_tick &&
+	git merge -m "Merge conflicting-G" conflicting-G &&
+
+	: first, test with a merge strategy option &&
+	git rebase -ir -Xtheirs G &&
+	echo conflicting-G >expect &&
+	test_cmp expect G.t &&
+
+	: now, try with a merge strategy other than recursive &&
+	git reset --hard @{1} &&
+	write_script git-merge-override <<-\EOF &&
+	echo overridden$1 >>G.t
+	git add G.t
+	EOF
+	PATH="$PWD:$PATH" git rebase -ir -s override -Xxopt G &&
+	test_write_lines G overridden--xopt >expect &&
+	test_cmp expect G.t
+'
+
+test_expect_success '--rebase-merges with commit that can generate bad characters for filename' '
+	git checkout -b colon-in-label E &&
+	git merge -m "colon: this should work" G &&
+	git rebase --rebase-merges --force-rebase E
+'
+
+test_expect_success '--rebase-merges with message matched with onto label' '
+	git checkout -b onto-label E &&
+	git merge -m onto G &&
+	git rebase --rebase-merges --force-rebase E &&
+	test_cmp_graph <<-\EOF
+	*   onto
+	|\
+	| * G
+	| * F
+	* |   E
+	|\ \
+	| * | B
+	* | | D
+	| |/
+	|/|
+	* | C
+	|/
+	* A
+	EOF
 '
 
 test_done
